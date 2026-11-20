@@ -6,7 +6,7 @@ on:
   pull_request:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.repository }}-picco-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -99,20 +99,6 @@ jobs:
         # Short board-specific names keep pull-request artifacts easy to identify.
         # The release workflow applies the published crosspoint-<version>-<device>.bin names.
         include:
-          - env: default
-            asset: firmware.bin
-          - env: sticky
-            asset: firmware-sticky.bin
-          - env: x4pro
-            asset: firmware-x4pro.bin
-          - env: x4c
-            asset: firmware-x4c.bin
-          - env: papermono
-            asset: firmware-papermono.bin
-          - env: metalio_eink4
-            asset: firmware-metalio_eink4.bin
-          - env: eego_a4
-            asset: firmware-eego_a4.bin
           - env: picco
             asset: firmware-picco.bin
     steps:

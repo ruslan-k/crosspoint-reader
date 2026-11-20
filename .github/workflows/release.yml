@@ -21,27 +21,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - release_env: gh_release
-            rc_env: gh_release_rc
-            device: x3-x4
-          - release_env: sticky-gh_release
-            rc_env: sticky-gh_release_rc
-            device: sticky
-          - release_env: x4pro-gh_release
-            rc_env: x4pro-gh_release_rc
-            device: x4pro
-          - release_env: x4c-gh_release
-            rc_env: x4c-gh_release_rc
-            device: x4c
-          - release_env: papermono-gh_release
-            rc_env: papermono-gh_release_rc
-            device: papermono
-          - release_env: metalio_eink4-gh_release
-            rc_env: metalio_eink4-gh_release_rc
-            device: metalio_eink4
-          - release_env: eego_a4-gh_release
-            rc_env: eego_a4-gh_release_rc
-            device: eego_a4
           - release_env: picco-gh_release
             rc_env: picco-gh_release_rc
             device: picco
@@ -121,21 +100,6 @@ jobs:
           cp ".pio/build/${PIO_ENV}/firmware.bin" "$asset"
           echo "name=$asset" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare license asset
-        if: matrix.device == 'x3-x4'
-        env:
-          PIO_ENV: ${{ github.event.release.prerelease && matrix.rc_env || matrix.release_env }}
-        run: python3 scripts/build_release_license.py --env "$PIO_ENV" --output dist/LICENSE
-
-      - name: Stage license asset
-        if: matrix.device == 'x3-x4'
-        uses: actions/upload-artifact@v6
-        with:
-          name: release-license
-          path: dist/LICENSE
-          if-no-files-found: error
-          retention-days: 1
-
       - name: Stage firmware asset
         uses: actions/upload-artifact@v6
         with:
@@ -158,22 +122,13 @@ jobs:
           pattern: crosspoint-*.bin
           merge-multiple: true
 
-      - name: Download license asset
-        uses: actions/download-artifact@v4
-        with:
-          name: release-license
-          path: dist
-
       - name: Attach firmware assets
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           version="${RELEASE_TAG#v}"
-          for device in x3-x4 sticky x4pro x4c papermono metalio_eink4 eego_a4 picco; do
-            test -f "dist/crosspoint-${version}-${device}.bin"
-          done
-          test "$(find dist -maxdepth 1 -type f -name 'crosspoint-*.bin' | wc -l)" -eq 8
-          test -s dist/LICENSE
-          gh release upload "$RELEASE_TAG" dist/crosspoint-*.bin dist/LICENSE \
+          test -s "dist/crosspoint-${version}-picco.bin"
+          test "$(find dist -maxdepth 1 -type f -name 'crosspoint-*.bin' | wc -l)" -eq 1
+          gh release upload "$RELEASE_TAG" "dist/crosspoint-${version}-picco.bin" \
             --repo "$GITHUB_REPOSITORY" --clobber

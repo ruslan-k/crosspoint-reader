@@ -2,24 +2,9 @@ name: Build custom AI firmware
 
 on:
   workflow_dispatch:
-    inputs:
-      device:
-        description: Target hardware (default is Xteink X3/X4)
-        required: true
-        type: choice
-        default: default
-        options:
-          - default
-          - x4pro
-          - x4c
-          - sticky
-          - papermono
-          - metalio_eink4
-          - eego_a4
-          - picco
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.device }}
+  group: ${{ github.repository }}-picco-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -27,11 +12,11 @@ permissions:
 
 jobs:
   firmware:
-    name: Build ${{ inputs.device }}
+    name: Build Picco
     runs-on: ubuntu-latest
     timeout-minutes: 100
     env:
-      PIO_ENV: ${{ inputs.device }}
+      PIO_ENV: picco
     steps:
       - uses: actions/checkout@v6
         with:
@@ -81,7 +66,7 @@ jobs:
       - name: Upload firmware and build diagnostics
         uses: actions/upload-artifact@v6
         with:
-          name: crosspoint-ai-${{ inputs.device }}-${{ github.sha }}
+          name: crosspoint-ai-picco-${{ github.sha }}
           path: |
             crosspoint-ai-*.bin
             BUILD-INFO.txt
