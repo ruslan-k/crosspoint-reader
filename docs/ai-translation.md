@@ -27,8 +27,13 @@ Other endpoints use OpenAI-compatible `/chat/completions` with a Bearer key.
 The legacy OpenCode Go URL `/zen/go/v1` is normalized **in memory**
 to `/inference/go/openai/v1`, without altering the saved key. For OpenCode Go,
 only `model` and `messages` are sent, matching the official API example.
-Select a Go model actually listed in the account; IDs such as
-`hy4-flash-free` are not in the currently published Go catalogue.
+OpenCode Go requires the `x-opencode-session` header. The reader now generates
+an independent 128-bit random session identifier for each one-request
+translation (one sentence = one conversation), using it only with Go; the ID
+is not logged or stored. The officially listed Go models include
+`hy4-flash-free` (check your subscription/account and availability).
+OpenCode Go is primarily intended for coding-agent traffic; provider-side
+access policies may still restrict translation requests from other clients.
 An already-complete `/chat/completions` URL is also accepted.
 
 ## Privacy and security
@@ -87,6 +92,10 @@ output requires an available font containing Cyrillic glyphs.
 
 The device logs through `serial-log (8).txt` on the mbedTLS firmware
 `7fa72c3` confirm successful TLS and an HTTP 400 (206-byte provider error).
+The subsequent `serial-log.txt` from firmware `22c1d32` identifies
+`MissingSessionID` for `hy4-flash-free`: Go refuses a request without
+`x-opencode-session`. This revision supplies a generated ID only for Go;
+the earlier TLS and URL migration fixes remain intact.
 The previous implementation hid the provider error body. The next revision
 logs only status, model and machine-readable error type/code; on the local
 E-Ink screen it shows a bounded, control-character-filtered provider error

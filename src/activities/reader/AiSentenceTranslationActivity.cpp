@@ -11,6 +11,7 @@
 #include <WiFi.h>
 #include <esp_err.h>
 #include <esp_http_client.h>
+#include <esp_random.h>
 
 #include <algorithm>
 #include <cctype>
@@ -286,6 +287,17 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
   } else if (setup == ESP_OK) {
     authHeader = "Bearer " + config.getKey();
     setup = esp_http_client_set_header(client, "Authorization", authHeader.c_str());
+  }
+  // Go requires x-opencode-session for routing and prompt-cache affinity.
+  // Every sentence translation is its own one-request conversation; generate
+  // a fresh random ID per request and never reuse it across books.
+  char goSession[40] = {};
+  if (setup == ESP_OK && ai_endpoint::isOpenCodeGoUrl(url)) {
+    snprintf(goSession, sizeof(goSession), "cp-%08x%08x%08x%08x", static_cast<unsigned>(esp_random()),
+             static_cast<unsigned>(esp_random()), static_cast<unsigned>(esp_random()),
+             static_cast<unsigned>(esp_random()));
+    setup = esp_http_client_set_header(client, "x-opencode-session", goSession);
+    LOG_INF("AI", "OpenCode Go request includes session routing header");
   }
   if (setup == ESP_OK) {
     setup = esp_http_client_set_post_field(client, body.data(), static_cast<int>(body.size()));
