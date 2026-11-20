@@ -7,10 +7,10 @@
 #include <I18n.h>
 #include <Logging.h>
 #include <Memory.h>
-#include <esp_err.h>
-#include <esp_http_client.h>
 #include <TrustedTime.h>
 #include <WiFi.h>
+#include <esp_err.h>
+#include <esp_http_client.h>
 
 #include <algorithm>
 #include <cctype>
@@ -51,7 +51,6 @@ esp_err_t onAiHttpEvent(esp_http_client_event_t* event) {
   response->data.append(static_cast<const char*>(event->data), bytes);
   return ESP_OK;
 }
-
 
 std::string trim(std::string s) {
   const auto space = [](const unsigned char c) { return std::isspace(c); };
@@ -265,8 +264,8 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
     int tlsError = 0;
     int tlsFlags = 0;
     esp_http_client_get_and_clear_last_tls_error(client, &tlsError, &tlsFlags);
-    LOG_ERR("AI", "mbedTLS HTTPS failed: host=%s result=%s tls=%d verify_flags=%d overflow=%d",
-            host.c_str(), esp_err_to_name(result), tlsError, tlsFlags, response.overflow);
+    LOG_ERR("AI", "mbedTLS HTTPS failed: host=%s result=%s tls=%d verify_flags=%d overflow=%d", host.c_str(),
+            esp_err_to_name(result), tlsError, tlsFlags, response.overflow);
   }
   esp_http_client_cleanup(client);
 
