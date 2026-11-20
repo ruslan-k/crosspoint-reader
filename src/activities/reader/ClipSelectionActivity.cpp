@@ -150,7 +150,13 @@ bool ClipSelectionActivity::extractWords() {
         if (block && block->valid()) firstPageWords += block->wordCount();
       }
     }
-    capacity = std::min<size_t>(UINT16_MAX, std::max<size_t>(MAX_SELECTABLE_WORDS, firstPageWords + 10));
+    // Retain more following-page words for sentence context, but stay within
+    // actual contiguous heap availability on non-PSRAM models.
+    const auto heap = HalMemory::getDefaultHeap();
+    const size_t desired = std::max<size_t>(MAX_SELECTABLE_WORDS, firstPageWords + 24);
+    const size_t heapWords = heap.largestBlockBytes > 8192 ? (heap.largestBlockBytes - 8192) / sizeof(WordBox) : 0;
+    const size_t safeWords = std::max<size_t>(240, heapWords);
+    capacity = std::min<size_t>(UINT16_MAX, std::min(desired, safeWords));
   }
   words = makeUniqueNoThrow<WordBox[]>(capacity);
   if (!words) {

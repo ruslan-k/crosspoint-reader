@@ -62,8 +62,13 @@ An already-complete `/chat/completions` URL is also accepted.
   the existing screen instead of opening the full Wi-Fi UI. The standard
   connection/selection screen appears only after saved-network attempts fail,
   or immediately when the user presses Confirm. Back cancels the selection.
-- During the AI request, a compact `Translating...` popup is displayed; the
-  translated word and Original/Translation page opens on success.
+- During the AI request, a compact `Translating...` popup is displayed. On success
+  a **dictionary-style overlay** opens over the retained EPUB page: 12pt text,
+  word + translation, Original, Translation. Swipe up/down (or left/right),
+  tap the upper/lower body, or use page buttons to scroll. Back, the top-right
+  Close label, or a tap outside the popup dismisses it without changing the
+  reader position. On memory-constrained boards with no spare framebuffer
+  storage, the overlay falls back to a white background.
 - Wi-Fi is switched off when leaving the translation if it was started by
   this activity. Pre-existing Wi-Fi sessions are left running.
 - If the serial console shows wolfSSL error `-188` (`ASN_NO_SIGNER_E`),
@@ -75,6 +80,21 @@ An already-complete `/chat/completions` URL is also accepted.
   provider/model combination that permits external API usage.
 - Translation requires active Wi-Fi and a valid system clock. API quotas
   and billing are controlled by the respective provider.
+
+## Long model responses
+
+Picco log `serial-log (1).txt` shows `ESP_ERR_HTTP_EAGAIN` at the original
+30-second timeout, and separate `HTTP 200 response_bytes=7859` failures
+caused by an 8 KiB response-body limit being exceeded on the next chunk.
+The client now waits up to 90 seconds and stores a bounded 48 KiB response
+in PSRAM where available (12 KiB internal-heap fallback). Oversized replies
+fail explicitly as `AI response too long` rather than misleading `HTTP 200`.
+The translation prompt requests compact JSON with `word_translation` and
+`sentence_translation`; the result parser accepts this JSON, the previous
+`WORD:`/`SENTENCE:` lines, and common OpenAI-style `content` array/`text`
+reply shapes, ignoring large unused reasoning metadata. Repeated provider
+latency or a noncompliant model can still cause an error; no successful
+long-sentence hardware test is claimed here.
 
 ## Limitations
 

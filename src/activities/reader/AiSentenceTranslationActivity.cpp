@@ -11,11 +11,13 @@
 #include <WiFi.h>
 #include <esp_err.h>
 #include <esp_http_client.h>
+#include <esp_heap_caps.h>
 #include <esp_random.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstring>
 #include <utility>
 
 #include "AITranslationStore.h"
@@ -24,15 +26,41 @@
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "CrossPointSettings.h"
 #include "util/AiApiEndpoint.h"
 #include "util/AiTranslationRoots.h"
 
 namespace {
 
-constexpr size_t MAX_RESPONSE_BYTES = 8 * 1024;
+// Picco frequently receives verbose completions from thinking models.
+// Keep the HTTP body in PSRAM, not in the <=40 KiB contiguous internal heap.
+constexpr size_t MAX_RESPONSE_BYTES = 48 * 1024;
+constexpr size_t FALLBACK_RESPONSE_BYTES = 12 * 1024;
+constexpr int AI_HTTP_TIMEOUT_MS = 90000;
 constexpr size_t MAX_SENTENCE_BYTES = 2048;
 constexpr uint32_t MIN_FREE_FOR_TLS = 35000;
 constexpr uint32_t MIN_BLOCK_FOR_TLS = 20000;
+
+struct AiPopupRect {
+  int x, y, width, height;
+};
+
+AiPopupRect aiPopupRect(const GfxRenderer& renderer) {
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int insetX = std::max(12, safe.width / 16);
+  const int insetY = std::max(16, safe.height / 11);
+  return {safe.x + insetX, safe.y + insetY, std::max(160, safe.width - insetX * 2),
+          std::max(180, safe.height - insetY * 2)};
+}
+
+int aiPopupFont(const GfxRenderer& renderer) {
+  return renderer.getFontMap().count(NOTOSANS_12_FONT_ID) ? NOTOSANS_12_FONT_ID : NOTOSANS_14_FONT_ID;
+}
+
+constexpr int AI_POPUP_TITLE_HEIGHT = 46;
+constexpr int AI_POPUP_FOOTER_HEIGHT = 32;
+constexpr int AI_POPUP_PADDING = 15;
+
 
 // Do not send model output or the full provider error body to serial. Only
 // machine-readable provider error identifiers are included in diagnostic logs.
@@ -70,20 +98,37 @@ std::string safeScreenError(const char* raw, const std::string& key, const std::
 // Bounded response buffer: an unexpectedly large provider response must not
 // exhaust internal RAM while ESP-IDF/mbedTLS is holding the TLS session.
 struct AiHttpResponse {
-  std::string data;
+  char* data = nullptr;
+  size_t used = 0;
+  size_t capacity = 0;
   bool overflow = false;
+
+  AiHttpResponse() {
+    data = static_cast<char*>(heap_caps_malloc(MAX_RESPONSE_BYTES + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    capacity = data ? MAX_RESPONSE_BYTES : 0;
+    if (!data && HalMemory::getDefaultHeap().largestBlockBytes > FALLBACK_RESPONSE_BYTES + 8192) {
+      data = static_cast<char*>(heap_caps_malloc(FALLBACK_RESPONSE_BYTES + 1, MALLOC_CAP_8BIT));
+      capacity = data ? FALLBACK_RESPONSE_BYTES : 0;
+    }
+    if (data) data[0] = '\0';
+  }
+  ~AiHttpResponse() { heap_caps_free(data); }
+  AiHttpResponse(const AiHttpResponse&) = delete;
+  AiHttpResponse& operator=(const AiHttpResponse&) = delete;
 };
 
 esp_err_t onAiHttpEvent(esp_http_client_event_t* event) {
   if (!event || event->event_id != HTTP_EVENT_ON_DATA) return ESP_OK;
   auto* response = static_cast<AiHttpResponse*>(event->user_data);
-  if (!response || event->data_len < 0) return ESP_FAIL;
+  if (!response || !response->data || event->data_len < 0) return ESP_FAIL;
   const size_t bytes = static_cast<size_t>(event->data_len);
-  if (bytes > MAX_RESPONSE_BYTES - response->data.size()) {
+  if (bytes > response->capacity - response->used) {
     response->overflow = true;
     return ESP_FAIL;
   }
-  response->data.append(static_cast<const char*>(event->data), bytes);
+  memcpy(response->data + response->used, event->data, bytes);
+  response->used += bytes;
+  response->data[response->used] = '\0';
   return ESP_OK;
 }
 
@@ -121,6 +166,27 @@ bool extractLabeledTranslation(const std::string& output, std::string& word, std
   return !sentence.empty();
 }
 
+// Backward-compatible response decoding for providers that return either the
+// new compact JSON payload or the old WORD:/SENTENCE: two-line form.
+bool extractTranslationText(const std::string& raw, std::string& word, std::string& sentence) {
+  const std::string output = trim(raw);
+  const size_t start = output.find('{');
+  const size_t end = output.rfind('}');
+  if (start != std::string::npos && end != std::string::npos && end >= start && end - start < 8192) {
+    JsonDocument translated;
+    if (deserializeJson(translated, output.substr(start, end - start + 1)) == DeserializationError::Ok) {
+      const char* w = translated["word_translation"].as<const char*>();
+      const char* t = translated["sentence_translation"].as<const char*>();
+      if (w && t) {
+        word = trim(w);
+        sentence = trim(t);
+        if (!word.empty() && !sentence.empty() && word.size() <= 256 && sentence.size() <= 4096) return true;
+      }
+    }
+  }
+  return extractLabeledTranslation(output, word, sentence);
+}
+
 }  // namespace
 
 AiSentenceTranslationActivity::AiSentenceTranslationActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
@@ -128,6 +194,128 @@ AiSentenceTranslationActivity::AiSentenceTranslationActivity(GfxRenderer& render
     : Activity("AiSentenceTranslation", renderer, mappedInput),
       word_(std::move(word)),
       sentence_(std::move(sentence)) {}
+
+AiSentenceTranslationActivity::~AiSentenceTranslationActivity() { releaseBackground(); }
+
+void AiSentenceTranslationActivity::captureUnderlyingPage() {
+  releaseBackground();
+  // Capture the actual EPUB/selection framebuffer before Wi-Fi screens replace
+  // it, so every redraw can paint an opaque modal over the retained page.
+  background_ = static_cast<uint8_t*>(heap_caps_malloc(HalDisplay::BUFFER_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (!background_ && HalMemory::getDefaultHeap().largestBlockBytes > HalDisplay::BUFFER_SIZE + 8192) {
+    background_ = static_cast<uint8_t*>(heap_caps_malloc(HalDisplay::BUFFER_SIZE, MALLOC_CAP_8BIT));
+  }
+  if (background_ && renderer.getWriteTarget()) {
+    memcpy(background_, renderer.getWriteTarget(), HalDisplay::BUFFER_SIZE);
+  } else {
+    releaseBackground();  // White fallback for memory-limited boards.
+  }
+}
+
+void AiSentenceTranslationActivity::releaseBackground() {
+  if (background_) heap_caps_free(background_);
+  background_ = nullptr;
+}
+
+void AiSentenceTranslationActivity::preparePopupLines() {
+  popupLines_.clear();
+  popupScroll_ = 0;
+  const AiPopupRect rect = aiPopupRect(renderer);
+  const int fontId = aiPopupFont(renderer);
+  const int bodyWidth = std::max(40, rect.width - 2 * AI_POPUP_PADDING - 10);
+  const int bodyHeight = std::max(20, rect.height - AI_POPUP_TITLE_HEIGHT - AI_POPUP_FOOTER_HEIGHT -
+                                        2 * AI_POPUP_PADDING);
+  popupVisibleLines_ = std::max(1, bodyHeight / std::max(1, renderer.getLineHeight(fontId) + 2));
+
+  // Pre-wrap only once; redraw and scroll operate on the same lines without
+  // repeatedly allocating strings or dropping the tail of a long sentence.
+  auto append = [this, fontId, bodyWidth](const std::string& text, const bool bold) {
+    size_t begin = 0;
+    while (begin <= text.size() && popupLines_.size() < 240) {
+      const size_t end = text.find('\n', begin);
+      const std::string segment =
+          text.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+      if (segment.empty()) {
+        popupLines_.push_back({"", false});
+      } else {
+        auto wrapped = renderer.wrappedText(fontId, segment.c_str(), bodyWidth, 192,
+                                            bold ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR);
+        for (auto& line : wrapped) {
+          if (popupLines_.size() >= 240) break;
+          popupLines_.push_back({std::move(line), bold});
+        }
+      }
+      if (end == std::string::npos) break;
+      begin = end + 1;
+    }
+  };
+
+  append(word_ + " — " + wordTranslation_, true);
+  append("", false);
+  append(tr(STR_AI_ORIGINAL), true);
+  append(sentence_, false);
+  append("", false);
+  append(tr(STR_AI_TRANSLATION), true);
+  append(sentenceTranslation_, false);
+}
+
+void AiSentenceTranslationActivity::scrollPopup(const int delta) {
+  RenderLock lock;
+  const int limit = std::max(0, static_cast<int>(popupLines_.size()) - popupVisibleLines_);
+  const int next = std::clamp(popupScroll_ + delta, 0, limit);
+  if (next != popupScroll_) {
+    popupScroll_ = next;
+    requestUpdate();
+  }
+}
+
+void AiSentenceTranslationActivity::drawPopup() const {
+  const AiPopupRect rect = aiPopupRect(renderer);
+  const int fontId = aiPopupFont(renderer);
+  const int lineHeight = std::max(1, renderer.getLineHeight(fontId) + 2);
+  const int bodyTop = rect.y + AI_POPUP_TITLE_HEIGHT + AI_POPUP_PADDING;
+  const int bodyHeight = std::max(20, rect.height - AI_POPUP_TITLE_HEIGHT - AI_POPUP_FOOTER_HEIGHT -
+                                        2 * AI_POPUP_PADDING);
+
+  // Inset white panel with a black border like the dictionary dialog.
+  renderer.fillRoundedRect(rect.x, rect.y, rect.width, rect.height, 5, Color::White);
+  renderer.drawRoundedRect(rect.x, rect.y, rect.width, rect.height, 2, 5, true);
+  renderer.drawText(NOTOSANS_14_FONT_ID, rect.x + AI_POPUP_PADDING, rect.y + 11, tr(STR_AI_TRANSLATE), true,
+                    EpdFontFamily::BOLD);
+  renderer.drawText(UI_12_FONT_ID, rect.x + rect.width - 48, rect.y + 13, "Close");
+  renderer.drawLine(rect.x + 12, rect.y + AI_POPUP_TITLE_HEIGHT, rect.x + rect.width - 12,
+                    rect.y + AI_POPUP_TITLE_HEIGHT, true);
+
+  const auto oldClip = renderer.getClipRect();
+  renderer.setClipRect(rect.x + AI_POPUP_PADDING, bodyTop, rect.width - 2 * AI_POPUP_PADDING - 6, bodyHeight);
+  const int last = std::min<int>(popupLines_.size(), popupScroll_ + popupVisibleLines_);
+  for (int index = popupScroll_; index < last; ++index) {
+    const PopupLine& line = popupLines_[index];
+    if (!line.text.empty()) {
+      renderer.drawText(fontId, rect.x + AI_POPUP_PADDING, bodyTop + (index - popupScroll_) * lineHeight,
+                        line.text.c_str(), true, line.bold ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR);
+    }
+  }
+  renderer.setClipRect(oldClip[0], oldClip[1], oldClip[2], oldClip[3]);
+
+  // Thin scroll thumb signals that swipe / page buttons can show more text.
+  const int extra = std::max(0, static_cast<int>(popupLines_.size()) - popupVisibleLines_);
+  if (extra > 0) {
+    const int thumb = std::max(18, bodyHeight * popupVisibleLines_ / static_cast<int>(popupLines_.size()));
+    const int offset = (bodyHeight - thumb) * popupScroll_ / extra;
+    renderer.fillRect(rect.x + rect.width - 9, bodyTop + offset, 3, thumb);
+  }
+  renderer.drawLine(rect.x + 12, rect.y + rect.height - AI_POPUP_FOOTER_HEIGHT,
+                    rect.x + rect.width - 12, rect.y + rect.height - AI_POPUP_FOOTER_HEIGHT);
+  char progress[32];
+  snprintf(progress, sizeof(progress), "%d-%d / %u", popupLines_.empty() ? 0 : popupScroll_ + 1,
+           std::min<int>(popupLines_.size(), popupScroll_ + popupVisibleLines_),
+           static_cast<unsigned>(popupLines_.size()));
+  renderer.drawText(UI_10_FONT_ID, rect.x + AI_POPUP_PADDING, rect.y + rect.height - 25, progress);
+  renderer.drawText(UI_10_FONT_ID, rect.x + rect.width - 130, rect.y + rect.height - 25, "Swipe to scroll");
+}
+
+
 
 void AiSentenceTranslationActivity::fail(std::string reason) {
   error_ = std::move(reason);
@@ -137,6 +325,7 @@ void AiSentenceTranslationActivity::fail(std::string reason) {
 
 void AiSentenceTranslationActivity::onEnter() {
   Activity::onEnter();
+  captureUnderlyingPage();
   if (!AI_TRANSLATION_STORE.loadFromFile() || !AI_TRANSLATION_STORE.configured()) {
     fail(tr(STR_AI_NOT_CONFIGURED));
     return;
@@ -215,9 +404,9 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
 
   const std::string prompt =
       "Translate the selected word in context and its complete source sentence into Russian. "
-      "Reply with exactly two lines, without markdown or commentary:\n"
-      "WORD: <Russian translation of the word>\n"
-      "SENTENCE: <Fluent Russian translation of the entire sentence>\n\n"
+      "Output a single compact JSON object with exactly two string keys: "
+      "word_translation and sentence_translation. No reasoning, examples, alternatives, markdown, or explanations. "
+      "The sentence_translation must cover the whole source sentence.\n\n"
       "Selected word: " +
       word_ + "\nSource sentence: " + sentence_;
 
@@ -225,12 +414,12 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
   if (gemini) {
     JsonObject item = req["contents"].to<JsonArray>().add<JsonObject>();
     item["parts"].to<JsonArray>().add<JsonObject>()["text"] = prompt;
-    req["generationConfig"].to<JsonObject>()["maxOutputTokens"] = 384;
+    req["generationConfig"].to<JsonObject>()["maxOutputTokens"] = 1024;
   } else {
     req["model"] = config.getModel();
-    // Go's published Chat Completions example only requires model/messages;
-    // do not send optional token fields to legacy API adapters.
-    if (!ai_endpoint::isOpenCodeGoUrl(url)) req["max_tokens"] = 384;
+    // A bounded completion keeps thinking-model replies from growing without
+    // limit; 1024 output tokens still covers a lengthy translated sentence.
+    req["max_tokens"] = 1024;
     JsonObject msg = req["messages"].to<JsonArray>().add<JsonObject>();
     msg["role"] = "user";
     msg["content"] = prompt;
@@ -259,11 +448,15 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
   // despite successfully loading both GTS Root R4 and its WE1 intermediate.
   // cert_pem and default hostname verification are mandatory for BYOK keys.
   AiHttpResponse response;
-  response.data.reserve(2048);
+  if (!response.data) {
+    fail(tr(STR_AI_LOW_MEMORY));
+    return false;
+  }
+  LOG_INF("AI", "HTTP response buffer: %u bytes", static_cast<unsigned>(response.capacity));
   esp_http_client_config_t httpConfig = {};
   httpConfig.url = url.c_str();
   httpConfig.method = HTTP_METHOD_POST;
-  httpConfig.timeout_ms = 30000;
+  httpConfig.timeout_ms = AI_HTTP_TIMEOUT_MS;
   httpConfig.cert_pem = ai_translation::ROOTS;
   httpConfig.skip_cert_common_name_check = false;
   httpConfig.disable_auto_redirect = true;  // Never forward API keys across redirects.
@@ -332,9 +525,14 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
 
     LOG_ERR("AI", "Provider request failed: model=%s status=%d type=%s code=%s", config.getModel().c_str(), status,
             safeErrorId(providerType).c_str(), safeErrorId(providerCode).c_str());
-    LOG_ERR("AI", "Translation HTTP failed: status=%d response_bytes=%u", status,
-            static_cast<unsigned>(response.data.size()));
-    if (status > 0) {
+    LOG_ERR("AI", "Translation HTTP failed: status=%d response_bytes=%u capacity=%u overflow=%d", status,
+            static_cast<unsigned>(response.used), static_cast<unsigned>(response.capacity), response.overflow);
+    if (response.overflow) {
+      LOG_ERR("AI", "Provider body exceeded the bounded buffer; reduce model output size");
+      fail("AI response too long");
+    } else if (result != ESP_OK && status <= 0) {
+      fail(tr(STR_AI_NETWORK_FAILED));
+    } else if (status > 0 && status != 200) {
       char statusText[32];
       snprintf(statusText, sizeof(statusText), "HTTP %d", status);
       const std::string explanation = safeScreenError(providerMessage, config.getKey(), sentence_);
@@ -346,13 +544,44 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
   }
 
   JsonDocument answer;
-  if (deserializeJson(answer, response.data) != DeserializationError::Ok) {
+  // Large reasoning/meta fields are irrelevant to a translation. ArduinoJson
+  // skips them during parsing, keeping the JSON document bounded.
+  JsonDocument filter;
+  filter["choices"][0]["message"]["content"] = true;
+  filter["choices"][0]["text"] = true;
+  filter["choices"][0]["finish_reason"] = true;
+  filter["output_text"] = true;
+  filter["candidates"][0]["content"]["parts"] = true;
+  if (deserializeJson(answer, response.data, DeserializationOption::Filter(filter)) != DeserializationError::Ok) {
     fail(tr(STR_AI_BAD_RESPONSE));
     return false;
   }
-  const char* output = gemini ? answer["candidates"][0]["content"]["parts"][0]["text"].as<const char*>()
-                              : answer["choices"][0]["message"]["content"].as<const char*>();
-  if (!output || !extractLabeledTranslation(output, wordTranslation, sentenceTranslation)) {
+  std::string output;
+  if (gemini) {
+    JsonArrayConst parts = answer["candidates"][0]["content"]["parts"].as<JsonArrayConst>();
+    for (JsonVariantConst part : parts) {
+      if (const char* text = part["text"].as<const char*>()) output += text;
+    }
+  } else {
+    JsonVariantConst content = answer["choices"][0]["message"]["content"];
+    if (const char* text = content.as<const char*>()) {
+      output = text;
+    } else if (JsonArrayConst parts = content.as<JsonArrayConst>(); !parts.isNull()) {
+      for (JsonVariantConst part : parts) {
+        if (const char* text = part["text"].as<const char*>()) output += text;
+      }
+    }
+    if (output.empty()) {
+      if (const char* text = answer["choices"][0]["text"].as<const char*>()) output = text;
+    }
+    if (output.empty()) {
+      if (const char* text = answer["output_text"].as<const char*>()) output = text;
+    }
+  }
+  if (!extractTranslationText(output, wordTranslation, sentenceTranslation)) {
+    const char* finish = answer["choices"][0]["finish_reason"].as<const char*>();
+    LOG_ERR("AI", "HTTP 200 with unrecognized translation payload: bytes=%u text_bytes=%u finish=%s",
+            static_cast<unsigned>(response.used), static_cast<unsigned>(output.size()), safeErrorId(finish).c_str());
     fail(tr(STR_AI_BAD_RESPONSE));
     return false;
   }
@@ -360,33 +589,56 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
 }
 
 void AiSentenceTranslationActivity::openResult(std::string wordTranslation, std::string sentenceTranslation) {
-  std::string definition;
-  definition.reserve(word_.size() + wordTranslation.size() + sentence_.size() + sentenceTranslation.size() + 64);
-  definition += word_;
-  definition += " — ";
-  definition += wordTranslation;
-  definition += "\n\n";
-  definition += tr(STR_AI_ORIGINAL);
-  definition += "\n";
-  definition += sentence_;
-  definition += "\n\n";
-  definition += tr(STR_AI_TRANSLATION);
-  definition += "\n";
-  definition += sentenceTranslation;
-
-  auto activity = makeUniqueNoThrow<DictionaryDefinitionActivity>(
-      renderer, mappedInput, std::string(tr(STR_AI_TRANSLATE)), std::move(definition), false);
-  if (!activity) {
-    fail(tr(STR_AI_LOW_MEMORY));
-    return;
+  {
+    RenderLock lock;
+    wordTranslation_ = std::move(wordTranslation);
+    sentenceTranslation_ = std::move(sentenceTranslation);
+    preparePopupLines();
+    state_ = State::Showing;
   }
-  state_ = State::Showing;
-  startActivityForResult(std::move(activity), [this](const ActivityResult&) { finish(); });
+  requestUpdate();
 }
 
 void AiSentenceTranslationActivity::loop() {
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     finish();
+    return;
+  }
+  if (state_ == State::Showing) {
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      finish();
+      return;
+    }
+    const auto swipe = mappedInput.wasSwipe();
+    if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Left) {
+      scrollPopup(std::max(1, popupVisibleLines_ - 3));
+    } else if (swipe == MappedInputManager::SwipeDir::Down || swipe == MappedInputManager::SwipeDir::Right) {
+      scrollPopup(-std::max(1, popupVisibleLines_ - 3));
+    }
+    if (mappedInput.wasPressed(MappedInputManager::Button::PageForward) ||
+        mappedInput.wasPressed(MappedInputManager::Button::NavNext) ||
+        mappedInput.wasPressed(MappedInputManager::Button::Down)) {
+      scrollPopup(std::max(1, popupVisibleLines_ - 3));
+    }
+    if (mappedInput.wasPressed(MappedInputManager::Button::PageBack) ||
+        mappedInput.wasPressed(MappedInputManager::Button::NavPrevious) ||
+        mappedInput.wasPressed(MappedInputManager::Button::Up)) {
+      scrollPopup(-std::max(1, popupVisibleLines_ - 3));
+    }
+    int x = -1;
+    int y = -1;
+    if (mappedInput.wasScreenTapped(x, y)) {
+      const AiPopupRect rect = aiPopupRect(renderer);
+      if (x < rect.x || x >= rect.x + rect.width || y < rect.y || y >= rect.y + rect.height ||
+          (y < rect.y + AI_POPUP_TITLE_HEIGHT && x >= rect.x + rect.width - 70)) {
+        finish();
+      } else if (y >= rect.y + AI_POPUP_TITLE_HEIGHT &&
+                 y < rect.y + rect.height - AI_POPUP_FOOTER_HEIGHT) {
+        // Taps on the upper/lower half scroll a few lines; swipes scroll a page.
+        const int middle = rect.y + rect.height / 2;
+        scrollPopup(y < middle ? -4 : 4);
+      }
+    }
     return;
   }
   if (!requestPending_) return;
@@ -402,6 +654,7 @@ void AiSentenceTranslationActivity::loop() {
 
 void AiSentenceTranslationActivity::onExit() {
   Activity::onExit();
+  releaseBackground();
   if (wifiOwned_) {
     WiFi.disconnect(false);
     WiFi.mode(WIFI_OFF);
@@ -409,24 +662,33 @@ void AiSentenceTranslationActivity::onExit() {
 }
 
 void AiSentenceTranslationActivity::render(RenderLock&&) {
-  // Compact progress indicator rather than a full-screen loading activity.
-  // Clear a previous manual network chooser if one was shown.
-  if (state_ == State::Translating) {
+  // Repaint the captured EPUB/selection page rather than replacing it with
+  // an opaque full-screen translation activity. The dialog itself is opaque,
+  // so the page under its bounds never bleeds through.
+  if (background_ && renderer.getWriteTarget()) {
+    memcpy(renderer.getWriteTarget(), background_, HalDisplay::BUFFER_SIZE);
+  } else {
     renderer.clearScreen();
+  }
+
+  if (state_ == State::Showing) {
+    drawPopup();
+    const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    renderer.displayBuffer();
+    return;
+  }
+  if (state_ == State::Translating) {
     GUI.drawPopup(renderer, tr(STR_AI_TRANSLATING));
     return;
   }
-  renderer.clearScreen();
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const Rect area = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
-  GUI.drawHeader(renderer, Rect{area.x, area.y, area.width, metrics.headerHeight}, tr(STR_AI_TRANSLATE));
-  const char* status = state_ == State::Connecting    ? tr(STR_CONNECTING)
-                       : state_ == State::Translating ? tr(STR_AI_TRANSLATING)
-                                                      : error_.c_str();
-  const Rect body{area.x + metrics.contentSidePadding, area.y + metrics.headerHeight + metrics.verticalSpacing,
-                  area.width - 2 * metrics.contentSidePadding,
-                  area.height - metrics.headerHeight - metrics.buttonHintsHeight - metrics.verticalSpacing};
-  UITheme::drawCenteredWrappedText(renderer, body, UI_12_FONT_ID, status, 6);
+  // Connection errors remain readable without displacing the EPUB page.
+  const AiPopupRect rect = aiPopupRect(renderer);
+  renderer.fillRoundedRect(rect.x, rect.y, rect.width, rect.height, 5, Color::White);
+  renderer.drawRoundedRect(rect.x, rect.y, rect.width, rect.height, 2, 5, true);
+  UITheme::drawCenteredWrappedText(renderer,
+                                  Rect{rect.x + 16, rect.y + 24, rect.width - 32, rect.height - 48},
+                                  NOTOSANS_14_FONT_ID, error_.c_str(), 9);
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   renderer.displayBuffer();

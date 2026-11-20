@@ -62,7 +62,7 @@ class ClipSelectionActivity final : public Activity {
     bool discretionaryHyphen = false;
   };
 
-  static constexpr size_t MAX_SELECTABLE_WORDS = 240;
+  static constexpr size_t MAX_SELECTABLE_WORDS = 320;
 
   bool extractWords();
   size_t pageCount() const { return borrowedPages.empty() ? pages.size() : borrowedPages.size(); }
