@@ -120,6 +120,28 @@ reply shapes, ignoring large unused reasoning metadata. Repeated provider
 latency or a noncompliant model can still cause an error; no successful
 long-sentence hardware test is claimed here.
 
+
+## Token-limit recovery (OpenCode Go / reasoning models)
+
+A Picco serial log from November 21, 2026 showed an HTTP **200** from
+`opencode.ai` with `finish=length`, response body of 10,960 bytes and
+`text_bytes=0`. This is not a TLS or connectivity error: the provider used
+its allowed completion budget before producing a usable translation. The old
+firmware used `max_tokens=1024` for all OpenAI-compatible models.
+
+Foreground translation now starts with **2,048 output tokens** (reasoning tokens
+may be included by the provider) and retries **once** with a cap of **4,096**
+only when the provider reports `finish_reason=length` or Gemini reports
+`finishReason=MAX_TOKENS` and no valid translation is present. No retry storm
+is possible; no failed or partial result is cached. If the second attempt also
+hits the limit, the screen reports `AI output truncated (token limit)` instead
+of claiming that the model returned a malformed translation. The serial log
+includes token counts when provided but never logs the model response itself.
+
+**Costs:** The retry makes one additional paid API call. This does not guarantee
+that every thinking model will comply; prefer a faster non-reasoning translator
+if it repeatedly exhausts its output cap.
+
 ## Limitations
 
 The sentence extractor uses EPUB word positions, paragraph starts, punctuation,

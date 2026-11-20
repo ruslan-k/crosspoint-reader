@@ -55,6 +55,8 @@ class AiSentenceTranslationActivity final : public Activity {
   std::unique_ptr<AiSentencePrefetchSession> prefetch_;
   std::string error_;
   bool requestPending_ = false;
+  bool retryPending_ = false;
+  uint8_t generationAttempt_ = 0;  // At most one bounded retry on token exhaustion.
   bool wifiOwned_ = false;
   uint8_t* background_ = nullptr;  // Optional PSRAM framebuffer snapshot.
   std::string wordTranslation_;

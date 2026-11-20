@@ -29,6 +29,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/AiApiEndpoint.h"
+#include "util/AiCompletionPolicy.h"
 #include "util/AiTranslationCache.h"
 #include "util/AiTranslationRoots.h"
 
@@ -435,12 +436,13 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
   if (gemini) {
     JsonObject item = req["contents"].to<JsonArray>().add<JsonObject>();
     item["parts"].to<JsonArray>().add<JsonObject>()["text"] = prompt;
-    req["generationConfig"].to<JsonObject>()["maxOutputTokens"] = 1024;
+    req["generationConfig"].to<JsonObject>()["maxOutputTokens"] =
+        ai_completion::maxOutputTokens(generationAttempt_);
   } else {
     req["model"] = config.getModel();
-    // A bounded completion keeps thinking-model replies from growing without
-    // limit; 1024 output tokens still covers a lengthy translated sentence.
-    req["max_tokens"] = 1024;
+    // Chat-completions max_tokens includes hidden reasoning for some models.
+    // Use a larger cap and retry once ONLY if finish_reason reports a limit.
+    req["max_tokens"] = ai_completion::maxOutputTokens(generationAttempt_);
     JsonObject msg = req["messages"].to<JsonArray>().add<JsonObject>();
     msg["role"] = "user";
     msg["content"] = prompt;
@@ -571,6 +573,9 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
   filter["choices"][0]["message"]["content"] = true;
   filter["choices"][0]["text"] = true;
   filter["choices"][0]["finish_reason"] = true;
+  filter["candidates"][0]["finishReason"] = true;
+  filter["usage"]["completion_tokens"] = true;
+  filter["usage"]["completion_tokens_details"]["reasoning_tokens"] = true;
   filter["output_text"] = true;
   filter["candidates"][0]["content"]["parts"] = true;
   if (deserializeJson(answer, response.data, DeserializationOption::Filter(filter)) != DeserializationError::Ok) {
@@ -600,10 +605,32 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
     }
   }
   if (!extractTranslationText(output, wordTranslation, sentenceTranslation)) {
-    const char* finish = answer["choices"][0]["finish_reason"].as<const char*>();
-    LOG_ERR("AI", "HTTP 200 with unrecognized translation payload: bytes=%u text_bytes=%u finish=%s",
-            static_cast<unsigned>(response.used), static_cast<unsigned>(output.size()), safeErrorId(finish).c_str());
-    fail(tr(STR_AI_BAD_RESPONSE));
+    const char* finish = gemini ? answer["candidates"][0]["finishReason"].as<const char*>()
+                                : answer["choices"][0]["finish_reason"].as<const char*>();
+    const std::string_view finishReason = finish ? std::string_view(finish) : std::string_view();
+    if (ai_completion::shouldRetry(finishReason, generationAttempt_)) {
+      // The server returned a 200 but exhausted the generation budget before
+      // returning usable text (e.g. all tokens went into hidden reasoning).
+      // Schedule ONE new request on the next activity tick; never cache partials.
+      retryPending_ = true;
+      LOG_INF("AI", "Completion hit token cap; retrying once with budget=%u",
+              static_cast<unsigned>(ai_completion::maxOutputTokens(1)));
+      return false;
+    }
+    const int completionTokens = answer["usage"]["completion_tokens"].is<int>()
+                                     ? answer["usage"]["completion_tokens"].as<int>()
+                                     : -1;
+    const int reasoningTokens = answer["usage"]["completion_tokens_details"]["reasoning_tokens"].is<int>()
+                                    ? answer["usage"]["completion_tokens_details"]["reasoning_tokens"].as<int>()
+                                    : -1;
+    LOG_ERR("AI", "Invalid translation: bytes=%u text_bytes=%u finish=%s attempt=%u budget=%u "
+                  "completion_tokens=%d reasoning_tokens=%d",
+            static_cast<unsigned>(response.used), static_cast<unsigned>(output.size()), safeErrorId(finish).c_str(),
+            static_cast<unsigned>(generationAttempt_ + 1),
+            static_cast<unsigned>(ai_completion::maxOutputTokens(generationAttempt_)), completionTokens,
+            reasoningTokens);
+    fail(ai_completion::isTokenLimit(finishReason) ? "AI output truncated (token limit). Try another model."
+                                                   : tr(STR_AI_BAD_RESPONSE));
     return false;
   }
   return true;
@@ -686,6 +713,13 @@ void AiSentenceTranslationActivity::loop() {
     // delayed by filesystem housekeeping.
     ai_translation_cache::save(bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel(), word_,
                                sentence_, wordTranslation_, sentenceTranslation_);
+  } else if (retryPending_) {
+    // No loops inside the network stack and no retry for errors other than a
+    // provider-confirmed output-token limit. A failed retry is final.
+    retryPending_ = false;
+    ++generationAttempt_;
+    requestPending_ = true;
+    requestUpdate();
   }
 }
 

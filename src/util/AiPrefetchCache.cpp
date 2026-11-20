@@ -127,8 +127,11 @@ bool readRecord(const Scope& scope, const Sentence& needle, Sentence& loaded) {
   if (heap.freeBytes < 20 * 1024 || heap.largestBlockBytes < 8 * 1024) return false;
   const uint64_t scopeHash = hashScope(scope);
   const uint64_t keyHash = hashKey(scopeHash, needle);
+  const std::string path = filePath(scopeHash, keyHash);
+  // A cache miss is expected; do not emit an SD open error for every lookup.
+  if (!Storage.exists(path.c_str())) return false;
   HalFile file;
-  if (!Storage.openFileForRead("AI_PRE", filePath(scopeHash, keyHash), file)) return false;
+  if (!Storage.openFileForRead("AI_PRE", path, file)) return false;
   Header header{};
   bool ok = file.read(&header, sizeof(header)) == sizeof(header) && header.magic == RECORD_MAGIC &&
             header.scopeHash == scopeHash && header.keyHash == keyHash && header.spine == needle.spine &&
@@ -177,14 +180,13 @@ bool lookup(const Scope& scope, const Sentence& sentence, uint32_t selectedOffse
             std::string& translatedWord, std::string& translatedSentence) {
   Sentence loaded;
   if (!readRecord(scope, sentence, loaded)) return false;
-  for (const Word& word : loaded.words) {
-    if (word.offset == selectedOffset && word.source == selectedWord) {
-      translatedWord = word.translation;
-      translatedSentence = loaded.translation;
-      return true;
-    }
-  }
-  return false;  // No fabricated word mapping; fall back to normal Translate.
+  const auto word = std::find_if(loaded.words.begin(), loaded.words.end(), [&](const Word& item) {
+    return item.offset == selectedOffset && item.source == selectedWord;
+  });
+  if (word == loaded.words.end()) return false;  // Never invent a word mapping.
+  translatedWord = word->translation;
+  translatedSentence = loaded.translation;
+  return true;
 }
 
 bool save(const Scope& scope, const Sentence& s) {
@@ -236,8 +238,10 @@ bool save(const Scope& scope, const Sentence& s) {
 
 bool loadCheckpoint(const Scope& scope, Checkpoint& out) {
   const uint64_t scopeHash = hashScope(scope);
+  const std::string path = directory(scopeHash) + "/checkpoint.bin";
+  if (!Storage.exists(path.c_str())) return false;  // No checkpoint on first use is normal.
   HalFile file;
-  if (!Storage.openFileForRead("AI_PRE", directory(scopeHash) + "/checkpoint.bin", file)) return false;
+  if (!Storage.openFileForRead("AI_PRE", path, file)) return false;
   DiskCheckpoint c{};
   if (file.fileSize() != sizeof(c) || file.read(&c, sizeof(c)) != sizeof(c) || c.magic != CHECKPOINT_MAGIC ||
       c.scopeHash != scopeHash || c.reserved != 0 || c.scanned > WINDOW_SENTENCES || c.nextOffset < c.anchor)
