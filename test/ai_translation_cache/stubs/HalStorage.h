@@ -27,6 +27,7 @@ class HalFile {
     file_.seekg(pos);
     return static_cast<size_t>(end);
   }
+  size_t position() { return static_cast<size_t>(file_.tellg()); }
   void flush() { file_.flush(); }
   bool close() { file_.close(); return true; }
  private:

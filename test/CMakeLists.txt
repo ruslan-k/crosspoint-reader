@@ -107,6 +107,7 @@ add_subdirectory(plugin_manifest_classification)
 add_subdirectory(plugin_picker_layout)
 add_subdirectory(protected_paths)
 add_subdirectory(ai_translation_cache)
+add_subdirectory(ai_prefetch)
 
 # The EPUB sentence boundary helper is hardware-independent C++20.
 add_executable(ai_sentence_utils ai_sentence/AiSentenceUtilsTest.cpp)

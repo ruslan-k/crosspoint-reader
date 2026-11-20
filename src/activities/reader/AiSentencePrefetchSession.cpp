@@ -208,6 +208,7 @@ size_t processResponse(const std::string& raw, const ai_prefetch::Scope& scope,
   size_t saved = 0;
   for (JsonVariantConst item : items) {
     if (cancel.load(std::memory_order_relaxed)) return saved;
+    if (!item["id"].is<int>()) continue;
     const int id = item["id"].as<int>();
     if (id < 0 || id >= static_cast<int>(input.size()) || ids[id]) continue;
     ids[id] = true;
