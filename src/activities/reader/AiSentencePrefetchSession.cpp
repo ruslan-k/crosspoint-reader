@@ -28,6 +28,7 @@
 #include "clippings/ClippingText.h"
 #include "util/AiApiEndpoint.h"
 #include "util/AiSentenceUtils.h"
+#include "util/AiPrefetchStream.h"
 #include "util/AiTranslationRoots.h"
 
 namespace {
@@ -44,6 +45,8 @@ constexpr uint32_t MIN_PSRAM_FREE = 144 * 1024;
 constexpr uint32_t MIN_PSRAM_BLOCK = 64 * 1024;
 constexpr size_t TOKENS_PER_TICK = 48;
 constexpr size_t MAX_PAGE_TOKENS = 320;
+constexpr size_t SSE_LINE_CAP = 8 * 1024;
+constexpr size_t JSON_OBJECT_CAP = 24 * 1024;
 
 // Never compete with the reader for its last heap blocks. TLS needs internal
 // buffers even when JSON and the HTTP body are backed by Picco PSRAM.
@@ -75,7 +78,7 @@ bool buildUrl(std::string& url, const std::string& model, bool& gemini) {
     const auto pos = url.find("/models/");
     if (pos != std::string::npos) url.resize(pos);
     if (url.back() == '/') url.pop_back();
-    url += "/models/" + model + ":generateContent?fields=candidates.content.parts.text";
+    url += "/models/" + model + ":streamGenerateContent?alt=sse";
   } else {
     if (url.back() == '/') url.pop_back();
     if (!url.ends_with("/chat/completions")) url += "/chat/completions";
@@ -152,12 +155,14 @@ std::string getOutput(const Response& response, bool gemini) {
 
 bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, const std::string& model,
                   std::string& body) {
+  // Send only missing word indices (the durable cache supplies the rest).
   JsonDocument payload;
   JsonArray sentences = payload["sentences"].to<JsonArray>();
   for (size_t i = 0; i < batch.size(); ++i) {
     JsonObject sentence = sentences.add<JsonObject>();
     sentence["id"] = static_cast<unsigned>(i);
     sentence["text"] = batch[i].source;
+    sentence["need_sentence"] = batch[i].translation.empty();
     JsonArray words = sentence["words"].to<JsonArray>();
     for (size_t w = 0; w < batch[i].words.size(); ++w) {
       JsonObject word = words.add<JsonObject>();
@@ -170,13 +175,14 @@ bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, 
   serializeJson(payload, input);
   if (payload.overflowed() || input.size() > 17000) return false;
   const std::string prompt =
-      "Translate all numbered source sentences and EACH numbered source word into Russian in its own "
-      "sentence context. Do not omit or reorder word ids. Each word translation should be brief "
-      "(not an explanation). Return ONLY compact JSON with schema "
-      "{\"items\":[{\"id\":0,\"translation\":\"...\","
-      "\"words\":[{\"i\":0,\"translation\":\"...\"}]}]}. "
-      "All input sentence IDs and word IDs must occur exactly once. "
-      "No commentary, examples, markdown, or reasoning.\n" +
+      "Translate the numbered text into Russian. Respond with exactly one standalone, compact JSON object "
+      "per sentence, each on its own line (NDJSON). Emit id=0 first, then in increasing id order. "
+      "For each id include {\"id\":0,\"translation\":\"...\",\"words\":[{\"i\":0,\"translation\":\"...\"}]}. "
+      "If need_sentence=false omit translation (already cached). The numbered words list contains "
+      "ONLY missing contextual word translations; return as many valid word entries as possible, "
+      "never invent indices or fill missing words with placeholders. Each word translation is brief. "
+      "Do not wait for all sentences to write the first object. No markdown fences, explanations, "
+      "or a surrounding items array. Source:\n" +
       input;
   JsonDocument request;
   if (gemini) {
@@ -186,6 +192,7 @@ bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, 
   } else {
     request["model"] = model;
     request["max_tokens"] = 6144;
+    request["stream"] = true;
     JsonObject message = request["messages"].to<JsonArray>().add<JsonObject>();
     message["role"] = "user";
     message["content"] = prompt;
@@ -194,54 +201,40 @@ bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, 
   return !request.overflowed() && body.size() <= MAX_BATCH_BODY;
 }
 
-size_t processResponse(const std::string& raw, const ai_prefetch::Scope& scope,
-                       const std::vector<ai_prefetch::Sentence>& input, std::atomic<bool>& cancel) {
-  size_t start = raw.find('{');
-  size_t end = raw.rfind('}');
-  if (start == std::string::npos || end == std::string::npos || end < start || end - start > 24 * 1024) return 0;
-  JsonDocument result;
-  if (deserializeJson(result, raw.substr(start, end - start + 1)) != DeserializationError::Ok) return 0;
-  JsonArrayConst items = result["items"].as<JsonArrayConst>();
-  if (items.isNull()) return 0;
-  bool ids[ai_prefetch::BATCH_SENTENCES] = {};
-  size_t saved = 0;
-  for (JsonVariantConst item : items) {
-    if (cancel.load(std::memory_order_relaxed)) return saved;
-    if (!item["id"].is<int>()) continue;
-    const int id = item["id"].as<int>();
-    if (id < 0 || id >= static_cast<int>(input.size()) || ids[id]) continue;
-    ids[id] = true;
-    const char* text = item["translation"].as<const char*>();
-    if (!text || !*text || strlen(text) > 4096) continue;
-    ai_prefetch::Sentence record = input[id];
-    record.translation = text;
-    JsonArrayConst words = item["words"].as<JsonArrayConst>();
-    if (words.isNull()) continue;
-    bool mapped[ai_prefetch::MAX_WORDS] = {};
-    size_t count = 0;
+// A model can return only a sentence, only a subset of requested words, or
+// both. Persist every validated fragment; the cache merges it with old data.
+bool saveItem(JsonVariantConst item, const ai_prefetch::Scope& scope,
+              const std::vector<ai_prefetch::Sentence>& batch, bool* stored) {
+  if (!item["id"].is<int>()) return false;
+  const int id = item["id"].as<int>();
+  if (id < 0 || id >= static_cast<int>(batch.size())) return false;
+  ai_prefetch::Sentence record = batch[id];
+  record.translation.clear();
+  record.words.clear();
+  const char* translated = item["translation"].as<const char*>();
+  if (translated && *translated && strlen(translated) <= 4096) record.translation = translated;
+  JsonArrayConst words = item["words"].as<JsonArrayConst>();
+  bool used[ai_prefetch::MAX_WORDS] = {};
+  if (!words.isNull()) {
     for (JsonVariantConst word : words) {
-      // Numeric type guards: absent "i" is NOT interpreted as zero.
       if (!word["i"].is<int>()) continue;
       const int i = word["i"].as<int>();
       const char* value = word["translation"].as<const char*>();
-      if (i < 0 || i >= static_cast<int>(record.words.size()) || mapped[i] || !value || !*value || strlen(value) > 256)
+      if (i < 0 || i >= static_cast<int>(batch[id].words.size()) || used[i] || !value || !*value ||
+          strlen(value) > 256)
         continue;
-      record.words[i].translation = value;
-      mapped[i] = true;
-      ++count;
+      ai_prefetch::Word translatedWord = batch[id].words[i];
+      translatedWord.translation = value;
+      record.words.push_back(std::move(translatedWord));
+      used[i] = true;
     }
-    // A partially translated batch cannot claim to be a complete word cache.
-    // Missing mappings will be resolved by normal foreground Translate later.
-    // The stricter 94 KiB guard is for starting TLS. After TLS cleanup,
-    // JSON parsing may legitimately consume some heap. Persist using the
-    // smaller, independent cache-write reserve instead of discarding results.
-    const auto cacheMemory = HalMemory::getInternalHeap();
-    if (count != record.words.size() || cacheMemory.freeBytes < 48 * 1024 ||
-        cacheMemory.largestBlockBytes < 20 * 1024 || cancel.load(std::memory_order_relaxed))
-      continue;
-    if (ai_prefetch::save(scope, record)) ++saved;
   }
-  return saved;
+  if (record.translation.empty() && record.words.empty()) return false;
+  std::sort(record.words.begin(), record.words.end(),
+            [](const ai_prefetch::Word& lhs, const ai_prefetch::Word& rhs) { return lhs.offset < rhs.offset; });
+  if (!ai_prefetch::save(scope, record)) return false;
+  stored[id] = true;
+  return true;
 }
 
 }  // namespace

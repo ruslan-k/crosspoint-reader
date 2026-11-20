@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "util/AiPrefetchCache.h"
@@ -41,6 +42,8 @@ class AiSentencePrefetchSession {
   void finishScan();
   bool launchBatch();
   void pollBatch();
+  void consumeStream();
+  void acceptStreamObject(std::string_view text);
 
   ai_prefetch::Scope scope_;
   Section* section_ = nullptr;
