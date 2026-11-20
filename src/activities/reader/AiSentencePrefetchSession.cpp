@@ -14,6 +14,7 @@
 #include <esp_random.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -252,48 +253,169 @@ struct AiSentencePrefetchSession::Job {
   Response response{&cancel};
   esp_http_client_handle_t client = nullptr;
   uint32_t startedAt = 0;
+  bool classified = false;
+  bool rawNonStreaming = false;
+  bool parseError = false;
+  bool stored[ai_prefetch::BATCH_SENTENCES] = {};
+  uint8_t accepted[ai_prefetch::BATCH_SENTENCES] = {};
+  char* sseLine = static_cast<char*>(heap_caps_malloc(SSE_LINE_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  char* jsonObject = static_cast<char*>(heap_caps_malloc(JSON_OBJECT_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  std::unique_ptr<ai_prefetch::StreamFramer> framer;
+  std::array<char*, ai_prefetch::BATCH_SENTENCES> deferred{};
+  std::array<size_t, ai_prefetch::BATCH_SENTENCES> deferredBytes{};
+
+  Job() {
+    if (sseLine && jsonObject) {
+      framer = std::make_unique<ai_prefetch::StreamFramer>(sseLine, SSE_LINE_CAP, jsonObject, JSON_OBJECT_CAP);
+    }
+  }
   ~Job() {
     if (client) esp_http_client_cleanup(client);
+    for (char* ptr : deferred) heap_caps_free(ptr);
+    heap_caps_free(sseLine);
+    heap_caps_free(jsonObject);
   }
 };
+
+void AiSentencePrefetchSession::acceptStreamObject(std::string_view json) {
+  if (!worker_) return;
+  Job& job = *worker_;
+  JsonDocument parsed;
+  if (deserializeJson(parsed, json.data(), json.size()) != DeserializationError::Ok) return;
+  const auto accept = [&](JsonVariantConst item) {
+    if (!item["id"].is<int>()) return;
+    const int id = item["id"].as<int>();
+    if (id < 0 || id >= static_cast<int>(job.batch.size()) || job.accepted[id] >= 4) return;
+    if (saveItem(item, job.scope, job.batch, job.stored)) {
+      ++job.accepted[id];
+      // The checkpoint is advisory only. Never skip a sentence merely
+      // because this counter claims that a later offset was visited.
+      if (ai_prefetch::saveCheckpoint(job.scope, job.checkpoint)) {
+        LOG_INF("AI_PRE", "Stream item saved: id=%d", id);
+      }
+    } else if (json.size() <= JSON_OBJECT_CAP && !job.deferred[id]) {
+      // TLS may leave too little internal RAM for the atomic file write.
+      // Copy the complete object to PSRAM and retry AFTER disconnecting TLS.
+      char* pending = static_cast<char*>(heap_caps_malloc(json.size(), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+      if (pending) {
+        memcpy(pending, json.data(), json.size());
+        job.deferred[id] = pending;
+        job.deferredBytes[id] = json.size();
+      }
+    }
+  };
+  JsonArrayConst items = parsed["items"].as<JsonArrayConst>();
+  if (!items.isNull()) {
+    for (JsonVariantConst item : items) accept(item);
+  } else {
+    accept(parsed.as<JsonVariantConst>());
+  }
+}
+
+void AiSentencePrefetchSession::consumeStream() {
+  if (!worker_ || !worker_->response.size || !worker_->framer) return;
+  Job& job = *worker_;
+  Response& buffer = job.response;
+  if (!job.classified) {
+    size_t i = 0;
+    while (i < buffer.size && (buffer.data[i] == ' ' || buffer.data[i] == '\r' ||
+                               buffer.data[i] == '\n' || buffer.data[i] == '\t'))
+      ++i;
+    if (i == buffer.size) return;
+    job.rawNonStreaming = buffer.data[i] == '{' || buffer.data[i] == '[';
+    job.classified = true;
+  }
+  if (job.rawNonStreaming) return;  // Buffer full ordinary JSON until HTTP completes.
+  const bool ok = job.framer->feedSse(buffer.data, buffer.size, [&](std::string_view frame) {
+    if (job.parseError) return;
+    JsonDocument chunk;
+    if (deserializeJson(chunk, frame.data(), frame.size()) != DeserializationError::Ok) return;
+    const auto feedText = [&](const char* text) {
+      if (!text || job.parseError) return;
+      if (!job.framer->feedModel(text, strlen(text),
+                                 [&](std::string_view record) { acceptStreamObject(record); })) {
+        job.parseError = true;
+      }
+    };
+    if (job.gemini) {
+      for (JsonVariantConst part : chunk["candidates"][0]["content"]["parts"].as<JsonArrayConst>()) {
+        feedText(part["text"].as<const char*>());
+      }
+    } else {
+      feedText(chunk["choices"][0]["delta"]["content"].as<const char*>());
+    }
+  });
+  if (!ok) job.parseError = true;
+  buffer.size = 0;  // Bounded reusable PSRAM transport buffer.
+  if (job.parseError) LOG_INF("AI_PRE", "SSE stream exceeds bounded parser capacity");
+}
+
+void AiSentencePrefetchSession::flushDeferred() {
+  if (!worker_) return;
+  Job& job = *worker_;
+  for (size_t id = 0; id < job.batch.size(); ++id) {
+    if (!job.deferred[id]) continue;
+    // Retry completed JSON records only; never replay an incomplete fragment.
+    JsonDocument parsed;
+    const bool valid =
+        deserializeJson(parsed, job.deferred[id], job.deferredBytes[id]) == DeserializationError::Ok;
+    if (valid && saveItem(parsed.as<JsonVariantConst>(), job.scope, job.batch, job.stored)) {
+      ai_prefetch::saveCheckpoint(job.scope, job.checkpoint);
+      LOG_INF("AI_PRE", "Deferred stream item saved: id=%u", static_cast<unsigned>(id));
+    }
+    heap_caps_free(job.deferred[id]);
+    job.deferred[id] = nullptr;
+    job.deferredBytes[id] = 0;
+  }
+}
 
 void AiSentencePrefetchSession::pollBatch() {
   if (!worker_) return;
   Job& job = *worker_;
   const auto mem = HalMemory::getInternalHeap();
-  if (WiFi.status() != WL_CONNECTED || static_cast<uint32_t>(millis() - job.startedAt) >= HTTP_TIMEOUT_MS ||
-      mem.freeBytes < MIN_INTERNAL_IN_FLIGHT) {
-    LOG_INF("AI_PRE", "Cancelled batch: timeout, Wi-Fi or low memory (free=%u)", static_cast<unsigned>(mem.freeBytes));
+  const bool expired = static_cast<uint32_t>(millis() - job.startedAt) >= HTTP_TIMEOUT_MS;
+  if (WiFi.status() != WL_CONNECTED || expired || mem.freeBytes < MIN_INTERNAL_IN_FLIGHT) {
+    // Salvage completed events already received, without any further TLS.
+    if (esp_http_client_get_status_code(job.client) == 200) consumeStream();
+    esp_http_client_cleanup(job.client);
+    job.client = nullptr;
+    flushDeferred();
+    LOG_INF("AI_PRE", "Cancelled batch: timeout/Wi-Fi/RAM (free=%u)", static_cast<unsigned>(mem.freeBytes));
     worker_.reset();
     disabled_ = true;
     return;
   }
+
   const esp_err_t result = esp_http_client_perform(job.client);
-  if (result == ESP_ERR_HTTP_EAGAIN) return;
   const int status = esp_http_client_get_status_code(job.client);
-  esp_http_client_cleanup(job.client);  // Free TLS before JSON and SD I/O.
+  if (status == 200) consumeStream();
+  if (result == ESP_ERR_HTTP_EAGAIN) return;
+
+  // Release TLS BEFORE any delayed JSON parse or SD write.
+  esp_http_client_cleanup(job.client);
   job.client = nullptr;
-  if (result != ESP_OK || status != 200 || job.response.overflow) {
-    LOG_INF("AI_PRE", "Batch failed: status=%d transport=%d overflow=%d", status, static_cast<int>(result),
-            job.response.overflow);
-    worker_.reset();
-    disabled_ = true;
-    return;
+  if (result == ESP_OK && status == 200 && job.rawNonStreaming && !job.parseError) {
+    // Some OpenAI-compatible gateways ignore stream=true. Accept the complete
+    // legacy body as a fallback without requiring a second paid API request.
+    const std::string text = getOutput(job.response, job.gemini);
+    if (!text.empty() && job.framer) {
+      if (!job.framer->feedModel(text.data(), text.size(),
+                                 [&](std::string_view record) { acceptStreamObject(record); })) {
+        job.parseError = true;
+      }
+    }
   }
-  const std::string output = getOutput(job.response, job.gemini);
-  if (output.empty()) {
-    LOG_INF("AI_PRE", "Batch rejected: empty or unsupported provider response");
-    worker_.reset();
-    disabled_ = true;
-    return;
+  flushDeferred();
+  size_t savedCount = 0;
+  for (size_t i = 0; i < job.batch.size(); ++i) {
+    if (job.stored[i]) ++savedCount;
   }
-  const size_t saved = processResponse(output, job.scope, job.batch, job.cancel);
-  if (saved > 0) ai_prefetch::saveCheckpoint(job.scope, job.checkpoint);
-  LOG_INF("AI_PRE", "Batch stored %u/%u sentences", static_cast<unsigned>(saved),
-          static_cast<unsigned>(job.batch.size()));
-  const bool complete = saved == job.batch.size();
+  LOG_INF("AI_PRE", "Stream stored %u/%u sentences, HTTP=%d transport=%d%s",
+          static_cast<unsigned>(savedCount), static_cast<unsigned>(job.batch.size()), status,
+          static_cast<int>(result), job.parseError ? " parse-limit" : "");
+  const bool complete = result == ESP_OK && status == 200 && savedCount == job.batch.size();
   worker_.reset();
-  if (!complete) disabled_ = true;
+  if (!complete) disabled_ = true;  // Retry missing pieces on next Translate.
 }
 
 AiSentencePrefetchSession::AiSentencePrefetchSession(ai_prefetch::Scope scope, Section* section, uint32_t spine,
@@ -313,8 +435,15 @@ AiSentencePrefetchSession::~AiSentencePrefetchSession() { cancel(); }
 
 void AiSentencePrefetchSession::cancel() {
   stopped_ = true;
-  if (worker_) worker_->cancel.store(true, std::memory_order_relaxed);
-  worker_.reset();  // Disconnect TLS synchronously before reader resumes.
+  if (worker_) {
+    if (worker_->client && esp_http_client_get_status_code(worker_->client) == 200) consumeStream();
+    if (worker_->client) {
+      esp_http_client_cleanup(worker_->client);
+      worker_->client = nullptr;
+    }
+    flushDeferred();  // Salvage complete items, never wait for another network packet.
+  }
+  worker_.reset();
   pageTokens_.clear();
   batch_.clear();
 }
@@ -376,8 +505,9 @@ void AiSentencePrefetchSession::completeSentence() {
   }
   if (current_.start > anchor_ && considered_ < ai_prefetch::WINDOW_SENTENCES) {
     ++considered_;
-    if (!droppedSentence_ && !ai_prefetch::has(scope_, current_)) {
-      batch_.push_back(std::move(current_));
+    if (!droppedSentence_) {
+      ai_prefetch::Sentence delta;
+      if (ai_prefetch::pending(scope_, current_, delta)) batch_.push_back(std::move(delta));
     }
   }
   current_ = {};
@@ -450,9 +580,18 @@ bool AiSentencePrefetchSession::launchBatch() {
   batch_.reserve(ai_prefetch::BATCH_SENTENCES);
   job->url = job->scope.url;
   if (!buildUrl(job->url, job->scope.model, job->gemini) ||
-      !buildRequest(job->batch, job->gemini, job->scope.model, job->body) || !job->response.data || !memoryReady() ||
+      !buildRequest(job->batch, job->gemini, job->scope.model, job->body) || !job->response.data || !job->framer ||
       !trustedtime::trustedNow()) {
-    LOG_INF("AI_PRE", "Batch skipped: bad endpoint, clock or low RAM");
+    // Do not reapply the 94 KiB preflight AFTER allocating JSON and response
+    // buffers. TLS gets its own contiguous-block check just below.
+    LOG_INF("AI_PRE", "Batch skipped: endpoint, clock, parser or bounded PSRAM buffers");
+    disabled_ = true;
+    return false;
+  }
+  const auto heap = HalMemory::getInternalHeap();
+  if (heap.freeBytes < 48 * 1024 || heap.largestBlockBytes < 20 * 1024) {
+    LOG_INF("AI_PRE", "Batch TLS reserve low: free=%u block=%u", static_cast<unsigned>(heap.freeBytes),
+            static_cast<unsigned>(heap.largestBlockBytes));
     disabled_ = true;
     return false;
   }

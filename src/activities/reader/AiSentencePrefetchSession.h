@@ -44,6 +44,7 @@ class AiSentencePrefetchSession {
   void pollBatch();
   void consumeStream();
   void acceptStreamObject(std::string_view text);
+  void flushDeferred();
 
   ai_prefetch::Scope scope_;
   Section* section_ = nullptr;
