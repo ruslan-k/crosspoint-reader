@@ -276,7 +276,7 @@ void batchTask(void* argument) {
     cfg.method = HTTP_METHOD_POST;
     // Non-blocking HTTPS allows the modal to cancel without another task
     // closing a live client handle (which is not thread-safe).
-    cfg.timeout_ms = 5000;
+    cfg.timeout_ms = 1000;
     cfg.is_async = true;
     cfg.cert_pem = ai_translation::ROOTS;
     cfg.skip_cert_common_name_check = false;

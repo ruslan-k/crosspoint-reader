@@ -1,11 +1,12 @@
 #pragma once
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <string>
-#include <unistd.h>
 
 class HalFile {
  public:
