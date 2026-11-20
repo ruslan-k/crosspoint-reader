@@ -37,7 +37,8 @@ An already-complete `/chat/completions` URL is also accepted.
 - The web interface itself is served over local HTTP; only configure on
   trusted Wi-Fi, and do not expose the device's web server to the internet.
 - Outbound requests use wolfSSL TLS chain and hostname verification with a
-  small built-in CA set (GTS R1/R2/R3/R4, ISRG Root X1, DigiCert Global Root G2).
+  built-in trust set (GTS R1/R2/R3/R4, ISRG Root X1, DigiCert Global Root G2;
+  plus the exact fingerprint-verified Google WE1 intermediate used by Cloudflare).
   Unrecognised CA chains fail closed; no `setInsecure()` fallback.
 - Wi-Fi starts on demand. The translation activity first tries the last
   successfully connected saved network, then asynchronously scans for other
@@ -72,6 +73,19 @@ word wrapping and page navigation are shared with dictionary display. Cyrillic
 output requires an available font containing Cyrillic glyphs.
 
 ## Diagnostics on Picco
+
+After verifying the configured endpoint `opencode.ai` in the device log,
+certificate transparency records show its 2026 leaf is signed by **Google Trust
+Services WE1**, and Google's CP/CPS identifies WE1 as issued by **GTS Root R4**.
+The six previously embedded roots include R4, yet wolfSSL 5.7.2 still returned
+`-188` with a successfully loaded trust store. This revision explicitly
+includes the authentic WE1 intermediate (SHA-256
+`1dfc1605fbad358d8bc844f76d15203fac9ca5c1a79fd4857ffaf2864fbebf96`)
+as a supplemental CA, without disabling chain or hostname verification.
+This is a **targeted compatibility experiment**, not a claim of successful
+device TLS. If it still fails, inspect the actual server-presented chain and
+wolfSSL's certificate verification callback before making further CA changes.
+
 
 On the Picco build from `53055c8`, successful Wi-Fi connection followed by
 `wolfSSL_connect failed: -188` does **not** establish which trust anchor is

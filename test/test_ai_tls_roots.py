@@ -2,6 +2,7 @@
 """Check the embedded AI HTTPS trust store without contacting any provider."""
 
 from pathlib import Path
+import hashlib
 import ssl
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,7 @@ expected = {
     "GTS Root R2",
     "GTS Root R3",
     "GTS Root R4",
+    "WE1",
     "ISRG Root X1",
     "DigiCert Global Root G2",
 }
@@ -31,4 +33,8 @@ loaded = {
     if key == "commonName"
 }
 assert loaded == expected, f"Unexpected or missing trusted roots: {loaded ^ expected}"
-print("AI trust bundle: 6 valid root certificates, includes GTS R4")
+# Pin the exact Google Trust Services WE1 intermediate used by opencode.ai.
+# Do not accept an arbitrary certificate merely because its CN says WE1.
+fingerprints = {hashlib.sha256(cert).hexdigest() for cert in ctx.get_ca_certs(binary_form=True)}
+assert "1dfc1605fbad358d8bc844f76d15203fac9ca5c1a79fd4857ffaf2864fbebf96" in fingerprints
+print("AI trust bundle: 6 roots plus fingerprint-verified WE1 intermediate")
