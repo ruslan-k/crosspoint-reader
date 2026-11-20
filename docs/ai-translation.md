@@ -38,7 +38,11 @@ An already-complete `/chat/completions` URL is also accepted.
 
 ## Privacy and security
 
-- Only the word and surrounding sentence are submitted on demand.
+- Foreground lookup submits the selected word and surrounding sentence on demand.
+  **On Picco, while the Translate popup is open**, background lookahead may also
+  submit up to 100 following sentences with their numbered source words,
+  in HTTPS requests of at most 4 sentences. This consumes additional API tokens
+  and may incur provider charges. The lookahead does not transmit the entire EPUB.
 - API keys are not compiled into firmware and never appear in the GET API
   response. POST `/api/ai-translation` supports setting and clearing the key.
 - Successful word+sentence translations are saved in the local exact-match cache
@@ -50,6 +54,13 @@ An already-complete `/chat/completions` URL is also accepted.
   The web file manager and plugins cannot open this protected directory, but
   physical access to the SD card still exposes the contents. API keys are not
   written into the cache.
+- Picco lookahead records are stored separately in
+  `/.crosspoint/ai-prefetch/<book-provider-model-hash>/<sentence-position-hash>.bin`.
+  Their sentence, translated sentence, per-word translations and source offsets
+  are **plaintext** on the SD card. A checksum validates every record. A tiny
+  `checkpoint.bin` is written atomically after completed batches; it is only
+  an advisory progress hint. Missing/corrupt entries are individually checked
+  before requesting again. The web file manager and plugins block this directory.
 - The key is MAC-XOR obfuscated on SD as in CrossPoint's existing OPDS
   credentials. **This is not cryptographic encryption.** The backing file
   `/.crosspoint/ai-translation.json` is protected from web file operations.
@@ -61,8 +72,10 @@ An already-complete `/chat/completions` URL is also accepted.
   `ASN_NO_SIGNER_E (-188)` failures against `opencode.ai`. Other firmware
   networking keeps its existing wolfSSL implementation.
 - All HTTP redirects are disabled: the API key is never forwarded to a
-  different origin. Response buffering is capped at 8 KiB, and only the
-  API hostname, status and TLS error codes are logged, never the key or text.
+  different origin. Foreground response buffering is capped at 48 KiB in PSRAM
+  (12 KiB fallback); Picco prefetch uses a PSRAM-only 48 KiB cap and a bounded
+  24 KiB request. Only sanitized diagnostics (such as status and counts) are logged,
+  never the key, book text, translated words or provider response.
 - The same trust set (GTS R1/R2/R3/R4, ISRG Root X1, DigiCert Global Root G2,
   and verified WE1 intermediate) is used. Unknown chains fail closed.
 - Wi-Fi starts on demand. The translation activity first tries the last
@@ -119,23 +132,45 @@ The popup is now drawn directly by `AiSentenceTranslationActivity`; it does
 not use `DictionaryDefinitionActivity`. Its word wrapping and scrolling are
 bounded, and the chosen Ubuntu 10pt font includes Cyrillic glyphs.
 
-### Lookahead and background prefetch status
+### Picco lookahead prefetch (100 / 4 / Translate-only)
 
-**Not implemented yet:** preloading the next 100 sentences in the background.
-The current cache accelerates exact repeat word+sentence lookups only.
-The selection window holds at most 320 word boxes, so it cannot provide
-100 complete future sentences or span an unseen chapter. In addition,
-preloading sentence translations without contextual word translations
-would not make an arbitrary selected word immediately available.
+Implementation settings are fixed for Picco:
 
-A safe follow-up should scan already-built EPUB pages incrementally from
-spine and visible-text offset, request 2-4 sentences per bounded HTTPS batch
-only while idle with adequate heap headroom, and persist contextual word
-mappings together with each sentence. Deduplication must check individual
-cache records; a numeric high-water mark alone cannot skip gaps. Keep
-networking and SD writes off the page-turn path, allow cancellation when
-Translate closes, and respect provider costs and rate limits. These extra
-operations need a Picco hardware performance check before enabling them.
+- **Window:** up to 100 following sentences (within already-laid-out pages
+  of the active EPUB spine). The scan reads only one cached page at a time,
+  never triggering EPUB parsing or pagination; if the section cache ends,
+  lookahead stops there until the user later opens Translate again.
+- **Batch:** 4 sentences per HTTPS request (last batch may be smaller).
+  The response includes translated sentences **and contextual word translations**
+  keyed to the visible-codepoint position of each source word. Repeated words
+  at different offsets are not confused.
+- **Lifetime:** while the Translate modal is **Showing**, with Wi-Fi already
+  connected and a trusted clock. Cached offline translations show instantly,
+  but **do not automatically enable Wi-Fi solely for prefetch**.
+  A network worker runs separately from the UI/EPUB renderer. Only one
+  background HTTPS request may run globally; a modal dismissal signals
+  cancellation and prevents further batches.
+- **Memory:** background prefetch is Picco-only. It pauses unless at least
+  120 KiB internal RAM, a 44 KiB contiguous internal block, 144 KiB PSRAM
+  and a 64 KiB contiguous PSRAM block are available. Responses have a hard
+  48 KiB PSRAM buffer; request JSON is capped at 24 KiB. The HTTPS request
+  is nonblocking and has an overall 30-second timeout, with cancellation
+  tested between nonblocking polls. No page-turn path performs prefetch work.
+- **Crash recovery:** each validated sentence is written to an atomic,
+  checksummed binary record. The progress checkpoint is a hint, **never**
+  proof that all earlier sentences were translated. The scanner verifies
+  individual records and resends missing ones upon the next Translate open.
+- **Fallbacks:** a model may not return complete JSON or every numbered
+  word. Incomplete responses do not enter the word-mapping cache. If the
+  selected word/position has no valid cached mapping, ordinary foreground
+  translation is used. Failure of a prefetch batch disables retries until
+  the next Translate popup, avoiding provider rate-limit and OOM retry storms.
+
+The current implementation does **not** prefetch beyond the current spine
+or unseen/unbuilt pages, and it has not yet been verified against real AI
+models, battery performance, or memory pressure on physical Picco hardware.
+100 is a lookahead limit, not a guarantee that 100 replies will be ready
+before the user closes the popup.
 
 ## ESP-IDF HTTPS transport A/B
 
@@ -214,8 +249,8 @@ c++ -std=c++20 test/ai_sentence/AiSentenceUtilsTest.cpp -o /tmp/cp-ai-sentence-t
 /tmp/cp-ai-sentence-test
 ```
 
-Build the relevant firmware environment with `pio run -e default` (and other
-board profiles if shipped). Check Wi-Fi connection, HTTPS certificate
+Build the Picco firmware environment with `pio run -e picco` (the custom
+GitHub Actions workflow also targets Picco only). Check Wi-Fi connection, HTTPS certificate
 verification, low-memory error handling, provider-specific responses, and
 returning to the exact reader page after closing the translation.
 
