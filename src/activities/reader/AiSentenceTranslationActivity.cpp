@@ -436,8 +436,7 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
   if (gemini) {
     JsonObject item = req["contents"].to<JsonArray>().add<JsonObject>();
     item["parts"].to<JsonArray>().add<JsonObject>()["text"] = prompt;
-    req["generationConfig"].to<JsonObject>()["maxOutputTokens"] =
-        ai_completion::maxOutputTokens(generationAttempt_);
+    req["generationConfig"].to<JsonObject>()["maxOutputTokens"] = ai_completion::maxOutputTokens(generationAttempt_);
   } else {
     req["model"] = config.getModel();
     // Chat-completions max_tokens includes hidden reasoning for some models.
@@ -617,14 +616,14 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
               static_cast<unsigned>(ai_completion::maxOutputTokens(1)));
       return false;
     }
-    const int completionTokens = answer["usage"]["completion_tokens"].is<int>()
-                                     ? answer["usage"]["completion_tokens"].as<int>()
-                                     : -1;
+    const int completionTokens =
+        answer["usage"]["completion_tokens"].is<int>() ? answer["usage"]["completion_tokens"].as<int>() : -1;
     const int reasoningTokens = answer["usage"]["completion_tokens_details"]["reasoning_tokens"].is<int>()
                                     ? answer["usage"]["completion_tokens_details"]["reasoning_tokens"].as<int>()
                                     : -1;
-    LOG_ERR("AI", "Invalid translation: bytes=%u text_bytes=%u finish=%s attempt=%u budget=%u "
-                  "completion_tokens=%d reasoning_tokens=%d",
+    LOG_ERR("AI",
+            "Invalid translation: bytes=%u text_bytes=%u finish=%s attempt=%u budget=%u "
+            "completion_tokens=%d reasoning_tokens=%d",
             static_cast<unsigned>(response.used), static_cast<unsigned>(output.size()), safeErrorId(finish).c_str(),
             static_cast<unsigned>(generationAttempt_ + 1),
             static_cast<unsigned>(ai_completion::maxOutputTokens(generationAttempt_)), completionTokens,
