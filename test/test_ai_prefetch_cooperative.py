@@ -41,7 +41,7 @@ assert "StreamFramer" in prefetch
 assert "saveItem(item, job.scope, job.batch, job.stored)" in prefetch
 assert "flushDeferred();" in prefetch
 assert "request[\"stream\"]" not in prefetch  # fixed-buffer PSRAM writer, not ArduinoJson docs
-assert r'\\"stream\\":true' in prefetch
+assert "text/event-stream" in prefetch and "max_tokens" in prefetch
 assert "BoundedJsonWriter" in prefetch
 assert "HalMemory::allocatePsram(MAX_BATCH_BODY)" in prefetch
 print("Picco cooperative prefetch source guards passed")
