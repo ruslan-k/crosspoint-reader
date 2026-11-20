@@ -12,6 +12,9 @@
 #include <esp_heap_caps.h>
 #include <esp_http_client.h>
 #include <esp_random.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/idf_additions.h>
+#include <freertos/task.h>
 
 #include <algorithm>
 #include <array>
@@ -20,6 +23,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
@@ -41,7 +45,7 @@ constexpr int HTTP_TIMEOUT_MS = 60000;
 // Async ESP-IDF returns HTTP_INCOMPLETE_DATA when a TLS read times out
 // mid-SSE-chunk. 100 ms caused every OpenCode Go lookahead batch to fail.
 // Socket idle limit is distinct from the 60-second overall request budget.
-constexpr int HTTP_READ_IDLE_TIMEOUT_MS = 30000;
+constexpr int HTTP_READ_IDLE_TIMEOUT_MS = 6000;
 constexpr uint32_t MIN_INTERNAL_IN_FLIGHT = 15 * 1024;
 // Cooperative client uses the existing Translate task stack, unlike the old worker.
 constexpr uint32_t MIN_INTERNAL_FREE = 94 * 1024;
@@ -57,6 +61,8 @@ constexpr size_t JSON_OBJECT_CAP = 24 * 1024;
 // ordinary completion JSON on later Translate sessions, without retrying a
 // potentially billable request immediately.
 std::string gNonStreamingEndpoint;
+std::atomic<bool> gPrefetchTaskBusy{false};
+constexpr uint32_t PREFETCH_TASK_STACK_BYTES = 12 * 1024;
 
 // Never compete with the reader for its last heap blocks. TLS needs internal
 // buffers even when JSON and the HTTP body are backed by Picco PSRAM.
@@ -224,13 +230,13 @@ bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, 
   ai_prefetch::BoundedJsonWriter request(body, capacity);
   if (gemini) {
     if (!request.append("{\"contents\":[{\"parts\":[{\"text\":") || !request.quoted(prompt.view()) ||
-        !request.append("}]}],\"generationConfig\":{\"maxOutputTokens\":6144}}"))
+        !request.append("}]}],\"generationConfig\":{\"maxOutputTokens\":2048}}"))
       return false;
   } else {
     if (!request.append("{\"model\":") || !request.quoted(model) ||
         !request.append(streaming
-                            ? ",\"max_tokens\":6144,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":"
-                            : ",\"max_tokens\":6144,\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":") ||
+                            ? ",\"max_tokens\":2048,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":"
+                            : ",\"max_tokens\":2048,\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":") ||
         !request.quoted(prompt.view()) || !request.append("}]}"))
       return false;
   }
@@ -288,6 +294,11 @@ struct AiSentencePrefetchSession::Job {
   bool gemini = false;
   bool streaming = true;
   std::atomic<bool> cancel{false};
+  std::atomic<bool> done{false};
+  size_t savedCount = 0;
+  uint32_t completedObjects = 0;
+  uint32_t recognizedItems = 0;
+  uint32_t discardedObjects = 0;
   Response response{&cancel};
   esp_http_client_handle_t client = nullptr;
   uint32_t startedAt = 0;
@@ -317,15 +328,18 @@ struct AiSentencePrefetchSession::Job {
   }
 };
 
-void AiSentencePrefetchSession::acceptStreamObject(std::string_view json) {
-  if (!worker_) return;
-  Job& job = *worker_;
+void AiSentencePrefetchSession::acceptStreamObject(Job& job, std::string_view json) {
+  ++job.completedObjects;
   JsonDocument parsed(&gPsramJsonAllocator);
-  if (deserializeJson(parsed, json.data(), json.size()) != DeserializationError::Ok) return;
+  if (deserializeJson(parsed, json.data(), json.size()) != DeserializationError::Ok) {
+    ++job.discardedObjects;
+    return;
+  }
   const auto accept = [&](JsonVariantConst item) {
-    if (!item["id"].is<int>()) return;
+    if (!item["id"].is<int>()) { ++job.discardedObjects; return; }
     const int id = item["id"].as<int>();
     if (id < 0 || id >= static_cast<int>(job.batch.size()) || job.accepted[id] >= 4) return;
+    ++job.recognizedItems;
     if (saveItem(item, job.scope, job.batch, job.stored)) {
       ++job.accepted[id];
       // The checkpoint is advisory only. Never skip a sentence merely
@@ -352,9 +366,8 @@ void AiSentencePrefetchSession::acceptStreamObject(std::string_view json) {
   }
 }
 
-void AiSentencePrefetchSession::consumeStream() {
-  if (!worker_ || !worker_->response.size || !worker_->framer) return;
-  Job& job = *worker_;
+void AiSentencePrefetchSession::consumeStream(Job& job) {
+  if (!job.response.size || !job.framer) return;
   Response& buffer = job.response;
   if (!job.classified) {
     size_t i = 0;
@@ -374,7 +387,7 @@ void AiSentencePrefetchSession::consumeStream() {
     const auto feedText = [&](const char* text) {
       if (!text || job.parseError) return;
       ++job.textParts;
-      if (!job.framer->feedModel(text, strlen(text), [&](std::string_view record) { acceptStreamObject(record); })) {
+      if (!job.framer->feedModel(text, strlen(text), [&](std::string_view record) { acceptStreamObject(job, record); })) {
         job.parseError = true;
       }
     };
@@ -391,9 +404,7 @@ void AiSentencePrefetchSession::consumeStream() {
   if (job.parseError) LOG_INF("AI_PRE", "SSE stream exceeds bounded parser capacity");
 }
 
-void AiSentencePrefetchSession::flushDeferred() {
-  if (!worker_) return;
-  Job& job = *worker_;
+void AiSentencePrefetchSession::flushDeferred(Job& job) {
   for (size_t id = 0; id < job.batch.size(); ++id) {
     if (!job.deferred[id]) continue;
     // Retry completed JSON records only; never replay an incomplete fragment.
@@ -422,60 +433,67 @@ void AiSentencePrefetchSession::flushDeferred() {
   }
 }
 
-void AiSentencePrefetchSession::pollBatch() {
-  if (!worker_) return;
-  Job& job = *worker_;
-  const auto mem = HalMemory::getInternalHeap();
-  const bool expired = static_cast<uint32_t>(millis() - job.startedAt) >= HTTP_TIMEOUT_MS;
-  if (WiFi.status() != WL_CONNECTED || expired || mem.freeBytes < MIN_INTERNAL_IN_FLIGHT) {
-    // Salvage completed events already received, without any further TLS.
-    if (esp_http_client_get_status_code(job.client) == 200) consumeStream();
-    esp_http_client_cleanup(job.client);
-    job.client = nullptr;
-    flushDeferred();
-    LOG_INF("AI_PRE", "Cancelled batch: timeout/Wi-Fi/RAM (free=%u)", static_cast<unsigned>(mem.freeBytes));
-    worker_.reset();
-    disabled_ = true;
-    return;
-  }
+void AiSentencePrefetchSession::runBatch(void* data) {
+  // The task owns its own shared job reference. It does not touch the popup,
+  // EPUB pages, renderer, or anything freed when Translate closes.
+  std::unique_ptr<std::shared_ptr<Job>> argument(static_cast<std::shared_ptr<Job>*>(data));
+  std::shared_ptr<Job> holder = std::move(*argument);
+  argument.reset();
+  Job& job = *holder;
 
-  const esp_err_t result = esp_http_client_perform(job.client);
-  const int status = esp_http_client_get_status_code(job.client);
-  if (status == 200) consumeStream();
-  if (result == ESP_ERR_HTTP_EAGAIN) return;
-
-  // Release TLS BEFORE any delayed JSON parse or SD write.
-  esp_http_client_cleanup(job.client);
-  job.client = nullptr;
-  if (result == ESP_OK && status == 200 && job.rawNonStreaming && !job.parseError) {
-    // Some OpenAI-compatible gateways ignore stream=true. Accept the complete
-    // legacy body as a fallback without requiring a second paid API request.
-    const std::string text = getOutput(job.response, job.gemini);
-    if (!text.empty() && job.framer) {
-      if (!job.framer->feedModel(text.data(), text.size(),
-                                 [&](std::string_view record) { acceptStreamObject(record); })) {
-        job.parseError = true;
-      }
+  esp_err_t result = ESP_FAIL;
+  int status = 0;
+  if (!job.cancel.load(std::memory_order_acquire) && job.client) {
+    while (!job.cancel.load(std::memory_order_acquire) &&
+           static_cast<uint32_t>(millis() - job.startedAt) < HTTP_TIMEOUT_MS) {
+      const auto heap = HalMemory::getInternalHeap();
+      if (heap.freeBytes < MIN_INTERNAL_IN_FLIGHT || WiFi.status() != WL_CONNECTED) break;
+      result = esp_http_client_perform(job.client);
+      status = esp_http_client_get_status_code(job.client);
+      if (status == 200) consumeStream(job);
+      if (result != ESP_ERR_HTTP_EAGAIN) break;
+      vTaskDelay(pdMS_TO_TICKS(10));
     }
   }
-  flushDeferred();
-  size_t savedCount = 0;
+
+  if (job.client) {
+    esp_http_client_cleanup(job.client);  // TLS freed before any deferred cache writes
+    job.client = nullptr;
+  }
+  if (result == ESP_OK && status == 200 && job.rawNonStreaming && !job.parseError &&
+      !job.cancel.load(std::memory_order_acquire)) {
+    const std::string output = getOutput(job.response, job.gemini);
+    if (!output.empty() && job.framer &&
+        !job.framer->feedModel(output.data(), output.size(),
+                               [&](std::string_view record) { acceptStreamObject(job, record); })) {
+      job.parseError = true;
+    }
+  }
+  // Save only completed records already received before closing Translate.
+  flushDeferred(job);
   for (size_t i = 0; i < job.batch.size(); ++i) {
-    if (job.stored[i]) ++savedCount;
+    if (job.stored[i]) ++job.savedCount;
   }
-  LOG_INF("AI_PRE", "Stream stored %u/%u HTTP=%d err=%d bytes=%u events=%u frames=%u parts=%u%s",
-          static_cast<unsigned>(savedCount), static_cast<unsigned>(job.batch.size()), status, static_cast<int>(result),
-          static_cast<unsigned>(job.response.totalBytes), static_cast<unsigned>(job.response.dataEvents),
-          static_cast<unsigned>(job.sseFrames), static_cast<unsigned>(job.textParts),
-          job.parseError ? " parse-limit" : "");
-  if (job.streaming && status == 200 && savedCount == 0 &&
-      (result == ESP_ERR_HTTP_INCOMPLETE_DATA || result == ESP_OK)) {
-    gNonStreamingEndpoint = job.scope.url;
-    LOG_INF("AI_PRE", "SSE incomplete/unusable; next Translate uses non-streaming JSON");
+  LOG_INF("AI_PRE", "Worker stored %u/%u HTTP=%d err=%d bytes=%u frames=%u objects=%u recognized=%u rejected=%u",
+          static_cast<unsigned>(job.savedCount), static_cast<unsigned>(job.batch.size()), status,
+          static_cast<int>(result), static_cast<unsigned>(job.response.totalBytes),
+          static_cast<unsigned>(job.sseFrames), static_cast<unsigned>(job.completedObjects),
+          static_cast<unsigned>(job.recognizedItems), static_cast<unsigned>(job.discardedObjects));
+  job.done.store(true, std::memory_order_release);
+  gPrefetchTaskBusy.store(false, std::memory_order_release);
+  holder.reset();
+  vTaskDeleteWithCaps(nullptr);
+}
+
+void AiSentencePrefetchSession::pollBatch() {
+  if (!worker_ || !worker_->done.load(std::memory_order_acquire)) return;
+  const bool complete = worker_->savedCount == worker_->batch.size();
+  if (!complete && worker_->streaming && worker_->sseFrames > 0 && worker_->savedCount == 0) {
+    gNonStreamingEndpoint = worker_->scope.url;
+    LOG_INF("AI_PRE", "No usable JSON objects in SSE; next batch uses ordinary JSON");
   }
-  const bool complete = result == ESP_OK && status == 200 && savedCount == job.batch.size();
   worker_.reset();
-  if (!complete) disabled_ = true;  // Retry missing pieces on next Translate.
+  if (!complete) disabled_ = true;  // No retry storm within this popup.
 }
 
 AiSentencePrefetchSession::AiSentencePrefetchSession(ai_prefetch::Scope scope, Section* section, uint32_t spine,
@@ -495,15 +513,8 @@ AiSentencePrefetchSession::~AiSentencePrefetchSession() { cancel(); }
 
 void AiSentencePrefetchSession::cancel() {
   stopped_ = true;
-  if (worker_) {
-    if (worker_->client && esp_http_client_get_status_code(worker_->client) == 200) consumeStream();
-    if (worker_->client) {
-      esp_http_client_cleanup(worker_->client);
-      worker_->client = nullptr;
-    }
-    flushDeferred();  // Salvage complete items, never wait for another network packet.
-  }
-  worker_.reset();
+  if (worker_) worker_->cancel.store(true, std::memory_order_release);
+  worker_.reset();  // The PSRAM worker owns the client until network shutdown.
   pageTokens_.clear();
   batch_.clear();
 }
@@ -621,6 +632,7 @@ bool AiSentencePrefetchSession::launchBatch() {
   pageTokens_.clear();
   std::vector<Token>().swap(pageTokens_);
   tokenIndex_ = 0;
+  if (gPrefetchTaskBusy.load(std::memory_order_acquire)) return;
   if (!memoryReady()) {
     if (!reportedMemoryPause_) {
       const auto mem = HalMemory::getInternalHeap();
@@ -719,13 +731,29 @@ bool AiSentencePrefetchSession::launchBatch() {
           static_cast<unsigned>(job->batch.size()), job->streaming ? "sse" : "json", HTTP_READ_IDLE_TIMEOUT_MS,
           static_cast<unsigned>(HalMemory::getInternalHeap().freeBytes),
           static_cast<unsigned>(HalMemory::getInternalHeap().largestBlockBytes));
-  worker_ = std::move(job);
-  if (worker_->streaming) {
-    worker_->response.onDataContext = this;
-    worker_->response.onDataReady = [](void* instance) {
-      static_cast<AiSentencePrefetchSession*>(instance)->consumeStream();
+  // Allocate a separate low-priority FreeRTOS stack in PSRAM so TLS waits
+  // cannot block Translate input. A global lease prevents overlapping tasks
+  // when the popup is closed and reopened quickly.
+  bool wasBusy = false;
+  if (!gPrefetchTaskBusy.compare_exchange_strong(wasBusy, true, std::memory_order_acq_rel)) return false;
+  std::shared_ptr<Job> shared = std::move(job);
+  if (shared->streaming) {
+    shared->response.onDataContext = shared.get();
+    shared->response.onDataReady = [](void* instance) {
+      consumeStream(*static_cast<Job*>(instance));
     };
   }
+  auto* argument = new (std::nothrow) std::shared_ptr<Job>(shared);
+  if (!argument ||
+      xTaskCreateWithCaps(&AiSentencePrefetchSession::runBatch, "ai-prefetch", PREFETCH_TASK_STACK_BYTES, argument,
+                          tskIDLE_PRIORITY + 1, nullptr, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+    delete argument;
+    gPrefetchTaskBusy.store(false, std::memory_order_release);
+    LOG_INF("AI_PRE", "Cannot create PSRAM HTTPS worker; prefetch disabled safely");
+    disabled_ = true;
+    return false;
+  }
+  worker_ = std::move(shared);
   return true;
 }
 

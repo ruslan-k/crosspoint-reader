@@ -42,9 +42,10 @@ class AiSentencePrefetchSession {
   void finishScan();
   bool launchBatch();
   void pollBatch();
-  void consumeStream();
-  void acceptStreamObject(std::string_view text);
-  void flushDeferred();
+  static void acceptStreamObject(Job& job, std::string_view text);
+  static void consumeStream(Job& job);
+  static void flushDeferred(Job& job);
+  static void runBatch(void* data);
 
   ai_prefetch::Scope scope_;
   Section* section_ = nullptr;
@@ -62,5 +63,5 @@ class AiSentencePrefetchSession {
   size_t tokenIndex_ = 0;
   ai_prefetch::Sentence current_;
   std::vector<ai_prefetch::Sentence> batch_;
-  std::unique_ptr<Job> worker_;
+  std::shared_ptr<Job> worker_;
 };
