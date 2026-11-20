@@ -36,7 +36,7 @@ class BoundedJsonWriter {
 
   bool quoted(std::string_view text) {
     if (!append("\"")) return false;
-    static constexpr char HEX[] = "0123456789abcdef";
+    static constexpr char HEX_DIGITS[] = "0123456789abcdef";
     for (unsigned char byte : text) {
       switch (byte) {
         case '"':
@@ -62,7 +62,7 @@ class BoundedJsonWriter {
           break;
         default:
           if (byte < 0x20) {
-            const char escape[6] = {'\\', 'u', '0', '0', HEX[(byte >> 4) & 15], HEX[byte & 15]};
+            const char escape[6] = {'\\', 'u', '0', '0', HEX_DIGITS[(byte >> 4) & 15], HEX_DIGITS[byte & 15]};
             if (!append(std::string_view(escape, sizeof(escape)))) return false;
           } else if (!append(std::string_view(reinterpret_cast<const char*>(&byte), 1))) {
             return false;
