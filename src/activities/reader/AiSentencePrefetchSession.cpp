@@ -636,7 +636,7 @@ bool AiSentencePrefetchSession::launchBatch() {
   pageTokens_.clear();
   std::vector<Token>().swap(pageTokens_);
   tokenIndex_ = 0;
-  if (gPrefetchTaskBusy.load(std::memory_order_acquire)) return;
+  if (gPrefetchTaskBusy.load(std::memory_order_acquire)) return false;
   if (!memoryReady()) {
     if (!reportedMemoryPause_) {
       const auto mem = HalMemory::getInternalHeap();
