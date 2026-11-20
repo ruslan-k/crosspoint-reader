@@ -19,6 +19,10 @@ assert "cfg.timeout_ms = HTTP_READ_IDLE_TIMEOUT_MS;" in prefetch
 assert "HTTP_STEP_TIMEOUT_MS = 100" not in prefetch
 assert "ESP_ERR_HTTP_INCOMPLETE_DATA" in prefetch
 assert "gNonStreamingEndpoint = job.scope.url;" in prefetch
+assert "onDataReady" in prefetch
+assert "result->onDataReady(result->onDataContext)" in prefetch
+assert "JsonDocument chunk(&gPsramJsonAllocator)" in prefetch
+assert "JsonDocument parsed(&gPsramJsonAllocator)" in prefetch
 assert "job->streaming = job->scope.url != gNonStreamingEndpoint" in prefetch
 assert "job->streaming ? \"text/event-stream\" : \"application/json\"" in prefetch
 assert "HTTP_TIMEOUT_MS = 60000" in prefetch

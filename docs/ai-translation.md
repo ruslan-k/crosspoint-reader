@@ -175,6 +175,14 @@ items, later packets for that endpoint use ordinary non-streaming JSON
 for the rest of this boot, without immediate paid retries.
 New diagnostics report mode=sse/json and frame/part counts, never book text.
 
+The stream is now parsed from each HTTP_EVENT_ON_DATA callback, not only
+when esp_http_client_perform returns. This keeps the transport buffer
+bounded to 48 KiB even for large multi-frame streams. ArduinoJson's
+parsing allocator uses PSRAM so low internal heap during TLS cannot
+discard complete JSON objects. The final log includes byte count and
+HTTP_EVENT_ON_DATA count to distinguish empty streams from invalid frames.
+
+
 The new implementation uses:
 - **100-sentence lookahead**, sorted by source offset, with the **nearest four
   missing/partial sentences** requested first.

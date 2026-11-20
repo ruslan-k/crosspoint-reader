@@ -116,6 +116,8 @@ struct Response {
   char* data = nullptr;
   size_t size = 0;
   bool overflow = false;
+  size_t totalBytes = 0;
+  uint32_t dataEvents = 0;
   std::atomic<bool>* cancel = nullptr;
   void (*onDataReady)(void*) = nullptr;
   void* onDataContext = nullptr;
@@ -141,6 +143,8 @@ esp_err_t onHttpEvent(esp_http_client_event_t* event) {
   const size_t bytes = static_cast<size_t>(event->data_len);
   memcpy(result->data + result->size, event->data, bytes);
   result->size += bytes;
+  result->totalBytes += bytes;
+  ++result->dataEvents;
   result->data[result->size] = '\0';
   // Decode the current SSE block before the next HTTP body callback. The
   // bounded 48-KiB PSRAM buffer is reused, so streamed completions can exceed
@@ -459,8 +463,9 @@ void AiSentencePrefetchSession::pollBatch() {
   for (size_t i = 0; i < job.batch.size(); ++i) {
     if (job.stored[i]) ++savedCount;
   }
-  LOG_INF("AI_PRE", "Stream stored %u/%u sentences, HTTP=%d transport=%d frames=%u parts=%u%s",
+  LOG_INF("AI_PRE", "Stream stored %u/%u HTTP=%d err=%d bytes=%u events=%u frames=%u parts=%u%s",
           static_cast<unsigned>(savedCount), static_cast<unsigned>(job.batch.size()), status, static_cast<int>(result),
+          static_cast<unsigned>(job.response.totalBytes), static_cast<unsigned>(job.response.dataEvents),
           static_cast<unsigned>(job.sseFrames), static_cast<unsigned>(job.textParts),
           job.parseError ? " parse-limit" : "");
   if (job.streaming && status == 200 && savedCount == 0 &&
