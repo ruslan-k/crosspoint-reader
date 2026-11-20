@@ -26,6 +26,6 @@ required = [
 for item in required:
     assert item in src, f"Missing popup capability: {item}"
 assert "DictionaryDefinitionActivity>(" not in src, "Old full-screen result activity remains"
-assert "State::Showing" in hdr and "popupScroll_" in hdr
+assert "Showing" in hdr and "popupScroll_" in hdr
 assert "MAX_SELECTABLE_WORDS = 320" in clip
 print("AI translation popup, scrolling, and selection guards passed")

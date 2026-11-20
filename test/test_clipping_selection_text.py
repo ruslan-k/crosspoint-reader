@@ -298,7 +298,7 @@ bool selectionLowMemory(const int first, const int last) {
 struct ClipSelectionActivity {
 """ + word_box + action_helpers + r"""
   std::unique_ptr<WordBox[]> words = makeUniqueNoThrow<WordBox[]>(240);
-  static constexpr size_t MAX_SELECTABLE_WORDS = 240;
+  static constexpr size_t MAX_SELECTABLE_WORDS = 320;
   enum class Mode { Clip, Lookup, DefinitionLookup };
   Mode mode = Mode::Clip;
   bool lookupAvailable = true;
@@ -500,6 +500,8 @@ int main() {
     assert(!cold.extractWords());
   }
   {
+    // Allow the expanded following-page word window for a long sentence.
+    HalMemory::stats = {1024 * 1024, 1024 * 1024};
     ClipSelectionActivity dense;
     auto page0 = std::make_unique<Page>();
     auto line0 = std::make_unique<PageLine>();
@@ -522,10 +524,10 @@ int main() {
     dense.pages.push_back(std::move(page1));
 
     assert(dense.extractWords());
-    assert(dense.wordCount == 310);
+    assert(dense.wordCount == 320);
     assert(dense.words[299].pageOffset == 0);
     assert(dense.words[300].pageOffset == 1);
-    assert(dense.words[309].pageOffset == 1);
+    assert(dense.words[319].pageOffset == 1);
   }
   HalMemory::stats = {5908, 3444};  // Physical X3 crash workload.
   assert(selectionLowMemory(0, 0));
