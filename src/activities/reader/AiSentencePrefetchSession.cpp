@@ -309,8 +309,8 @@ AiSentencePrefetchSession::AiSentencePrefetchSession(ai_prefetch::Scope scope, S
   batch_.reserve(ai_prefetch::BATCH_SENTENCES);
   current_.spine = spine_;
   ai_prefetch::Checkpoint saved;
-  LOG_INF("AI_PRE", "Translate lookahead initialized: spine=%u page=%d offset=%u",
-          static_cast<unsigned>(spine_), nextPage_, static_cast<unsigned>(anchor_));
+  LOG_INF("AI_PRE", "Translate lookahead initialized: spine=%u page=%d offset=%u", static_cast<unsigned>(spine_),
+          nextPage_, static_cast<unsigned>(anchor_));
   if (ai_prefetch::loadCheckpoint(scope_, saved) && saved.spine == spine_ && saved.anchor == anchor_) {
     LOG_INF("AI_PRE", "Resume checkpoint: scanned=%u", static_cast<unsigned>(saved.scanned));
   }
@@ -329,8 +329,7 @@ void AiSentencePrefetchSession::cancel() {
 bool AiSentencePrefetchSession::openPage() {
   if (!section_ || nextPage_ >= static_cast<int>(section_->pageCount)) {
     scanEnded_ = true;  // Never build EPUB pages merely for AI.
-    LOG_INF("AI_PRE", "Lookahead ended: available pages exhausted, scanned=%u",
-            static_cast<unsigned>(considered_));
+    LOG_INF("AI_PRE", "Lookahead ended: available pages exhausted, scanned=%u", static_cast<unsigned>(considered_));
     return false;
   }
   if (!memoryReady()) return false;
