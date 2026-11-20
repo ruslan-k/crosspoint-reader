@@ -318,7 +318,7 @@ struct ClipSelectionActivity {
   int lastRenderedPageOffset = 0, lastRenderedSelected = 0, lastRenderedRangeStart = -1;
   int lastRenderedTextOffset = 0, lastRenderedTextXOffset = 0;
   bool buildSelectedText(int first, int last, std::string& text) const;
-  bool buildSentenceText(int anchor, std::string& text) const;
+  bool buildSentenceText(int anchor, std::string& text, uint32_t* sentenceStartOffset = nullptr) const;
   bool extractWords();
   void drawSelection() const;
   bool renderIncremental();
