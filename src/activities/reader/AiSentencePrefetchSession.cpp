@@ -281,8 +281,8 @@ void AiSentencePrefetchSession::pollBatch() {
   esp_http_client_cleanup(job.client);  // Free TLS before JSON and SD I/O.
   job.client = nullptr;
   if (result != ESP_OK || status != 200 || job.response.overflow) {
-    LOG_INF("AI_PRE", "Batch failed: status=%d transport=%d overflow=%d", status,
-            static_cast<int>(result), job.response.overflow);
+    LOG_INF("AI_PRE", "Batch failed: status=%d transport=%d overflow=%d", status, static_cast<int>(result),
+            job.response.overflow);
     worker_.reset();
     disabled_ = true;
     return;
@@ -347,7 +347,8 @@ bool AiSentencePrefetchSession::openPage() {
       const auto range = block->wordSourceRange(i);
       const char* word = block->wordText(i);
       if (range.start == UINT32_MAX || range.end == UINT32_MAX || range.end <= range.start ||
-          range.end <= lastWordEnd_ || !clippingText::hasVisibleText(word)) continue;
+          range.end <= lastWordEnd_ || !clippingText::hasVisibleText(word))
+        continue;
       if (pageTokens_.size() >= MAX_PAGE_TOKENS) {
         disabled_ = true;
         pageTokens_.clear();
@@ -443,8 +444,8 @@ bool AiSentencePrefetchSession::launchBatch() {
   batch_.reserve(ai_prefetch::BATCH_SENTENCES);
   job->url = job->scope.url;
   if (!buildUrl(job->url, job->scope.model, job->gemini) ||
-      !buildRequest(job->batch, job->gemini, job->scope.model, job->body) || !job->response.data ||
-      !memoryReady() || !trustedtime::trustedNow()) {
+      !buildRequest(job->batch, job->gemini, job->scope.model, job->body) || !job->response.data || !memoryReady() ||
+      !trustedtime::trustedNow()) {
     LOG_INF("AI_PRE", "Batch skipped: bad endpoint, clock or low RAM");
     disabled_ = true;
     return false;
@@ -491,8 +492,8 @@ bool AiSentencePrefetchSession::launchBatch() {
     return false;
   }
   job->startedAt = millis();
-  LOG_INF("AI_PRE", "Batch started: count=%u internal=%u largest=%u",
-          static_cast<unsigned>(job->batch.size()), static_cast<unsigned>(HalMemory::getInternalHeap().freeBytes),
+  LOG_INF("AI_PRE", "Batch started: count=%u internal=%u largest=%u", static_cast<unsigned>(job->batch.size()),
+          static_cast<unsigned>(HalMemory::getInternalHeap().freeBytes),
           static_cast<unsigned>(HalMemory::getInternalHeap().largestBlockBytes));
   worker_ = std::move(job);
   return true;
@@ -515,9 +516,9 @@ void AiSentencePrefetchSession::tick() {
   if (tokenIndex_ >= pageTokens_.size() && !memoryReady()) {
     if (!reportedMemoryPause_) {
       const auto mem = HalMemory::getInternalHeap();
-      LOG_INF("AI_PRE", "Waiting for RAM: free=%u largest=%u need=%u/%u",
-              static_cast<unsigned>(mem.freeBytes), static_cast<unsigned>(mem.largestBlockBytes),
-              static_cast<unsigned>(MIN_INTERNAL_FREE), static_cast<unsigned>(MIN_INTERNAL_BLOCK));
+      LOG_INF("AI_PRE", "Waiting for RAM: free=%u largest=%u need=%u/%u", static_cast<unsigned>(mem.freeBytes),
+              static_cast<unsigned>(mem.largestBlockBytes), static_cast<unsigned>(MIN_INTERNAL_FREE),
+              static_cast<unsigned>(MIN_INTERNAL_BLOCK));
       reportedMemoryPause_ = true;
     }
     return;
@@ -543,8 +544,7 @@ void AiSentencePrefetchSession::tick() {
   }
   size_t stepped = 0;
   while (tokenIndex_ < pageTokens_.size() && stepped++ < TOKENS_PER_TICK &&
-         batch_.size() < ai_prefetch::BATCH_SENTENCES &&
-         considered_ < ai_prefetch::WINDOW_SENTENCES) {
+         batch_.size() < ai_prefetch::BATCH_SENTENCES && considered_ < ai_prefetch::WINDOW_SENTENCES) {
     const Token& token = pageTokens_[tokenIndex_++];
     acceptToken(token);
   }

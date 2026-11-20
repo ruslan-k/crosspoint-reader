@@ -712,9 +712,9 @@ void AiSentenceTranslationActivity::loop() {
     // Save only validated provider output; failed/partial results never enter the cache.
     // This happens after queuing the popup render, so the first result is not
     // delayed by filesystem housekeeping.
-    const bool cached = ai_translation_cache::save(bookPath_, AI_TRANSLATION_STORE.getUrl(),
-                                                   AI_TRANSLATION_STORE.getModel(), word_, sentence_,
-                                                   wordTranslation_, sentenceTranslation_);
+    const bool cached =
+        ai_translation_cache::save(bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel(), word_,
+                                   sentence_, wordTranslation_, sentenceTranslation_);
     LOG_INF("AI_CACHE", "Foreground translation cache save: %s", cached ? "ok" : "skipped");
   } else if (retryPending_) {
     // No loops inside the network stack and no retry for errors other than a
