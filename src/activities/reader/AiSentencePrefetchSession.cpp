@@ -213,7 +213,8 @@ bool saveItem(JsonVariantConst item, const ai_prefetch::Scope& scope, const std:
   record.translation.clear();
   record.words.clear();
   const char* translated = item["translation"].as<const char*>();
-  if (translated && *translated && strlen(translated) <= 4096) record.translation = translated;
+  if (batch[id].translation.empty() && translated && *translated && strlen(translated) <= 4096)
+    record.translation = translated;
   JsonArrayConst words = item["words"].as<JsonArrayConst>();
   bool used[ai_prefetch::MAX_WORDS] = {};
   if (!words.isNull()) {
@@ -591,17 +592,17 @@ bool AiSentencePrefetchSession::launchBatch() {
   batch_.reserve(ai_prefetch::BATCH_SENTENCES);
   job->url = job->scope.url;
   const bool endpointReady = buildUrl(job->url, job->scope.model, job->gemini);
-  bool requestReady = endpointReady &&
-                      buildRequest(job->batch, job->gemini, job->scope.model,
-                                   reinterpret_cast<char*>(job->body.get()), MAX_BATCH_BODY, job->bodyBytes);
+  bool requestReady =
+      endpointReady && buildRequest(job->batch, job->gemini, job->scope.model, reinterpret_cast<char*>(job->body.get()),
+                                    MAX_BATCH_BODY, job->bodyBytes);
   while (!requestReady && job->batch.size() > 1 && endpointReady) {
     // A long paragraph may exceed the fixed request cap. Preserve FIFO
     // priority and split into smaller packets rather than dropping the entire
     // 100-sentence lookahead window.
     batch_.insert(batch_.begin(), std::move(job->batch.back()));
     job->batch.pop_back();
-    requestReady = buildRequest(job->batch, job->gemini, job->scope.model,
-                                reinterpret_cast<char*>(job->body.get()), MAX_BATCH_BODY, job->bodyBytes);
+    requestReady = buildRequest(job->batch, job->gemini, job->scope.model, reinterpret_cast<char*>(job->body.get()),
+                                MAX_BATCH_BODY, job->bodyBytes);
   }
   if (!requestReady || !job->response.data || !job->framer || !trustedtime::trustedNow()) {
     // Do not reapply the 94 KiB preflight AFTER allocating JSON and response
@@ -638,6 +639,7 @@ bool AiSentencePrefetchSession::launchBatch() {
   }
   esp_err_t result = esp_http_client_set_header(job->client, "Content-Type", "application/json");
   if (result == ESP_OK) result = esp_http_client_set_header(job->client, "User-Agent", "CrossPoint-AI-Prefetch");
+  if (result == ESP_OK) result = esp_http_client_set_header(job->client, "Accept", "text/event-stream");
   if (result == ESP_OK && job->gemini) {
     result = esp_http_client_set_header(job->client, "x-goog-api-key", AI_TRANSLATION_STORE.getKey().c_str());
   } else if (result == ESP_OK) {

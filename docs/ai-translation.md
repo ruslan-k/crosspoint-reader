@@ -200,10 +200,12 @@ Implementation settings are fixed for Picco:
   of the active EPUB spine). The scan reads only one cached page at a time,
   never triggering EPUB parsing or pagination; if the section cache ends,
   lookahead stops there until the user later opens Translate again.
-- **Batch:** 4 sentences per HTTPS request (last batch may be smaller).
-  The response includes translated sentences **and contextual word translations**
-  keyed to the visible-codepoint position of each source word. Repeated words
-  at different offsets are not confused.
+- **Batch:** at most 4 sentences per HTTPS request (last or oversized
+  batches may be smaller). The provider emits per-sentence JSON records over
+  SSE, with contextual word translations identified by absolute source offsets.
+  Every valid sentence or individual word is atomically merged on arrival.
+  Previously cached sentence translations are preserved during word-only fills.
+  Repeated words at different offsets are not confused.
 - **Lifetime:** only while Translate is **Showing**, Wi-Fi is connected,
   and the clock is trusted. Offline cache hits never require a radio.
   A **cooperative asynchronous HTTPS state machine** uses Translate's existing
@@ -224,10 +226,11 @@ Implementation settings are fixed for Picco:
   proof that all earlier sentences were translated. The scanner verifies
   individual records and resends missing ones upon the next Translate open.
 - **Fallbacks:** a model may not return complete JSON or every numbered
-  word. Incomplete responses do not enter the word-mapping cache. If the
-  selected word/position has no valid cached mapping, ordinary foreground
-  translation is used. Failure of a prefetch batch disables retries until
-  the next Translate popup, avoiding provider rate-limit and OOM retry storms.
+  word. Each completed response item is saved even when other words are
+  missing. Incomplete JSON fragments are discarded; fully parsed items can
+  survive connection loss. A selected word without a valid cached mapping
+  still uses normal foreground translation. A failed network batch disables
+  retries until the next Translate popup, avoiding provider rate-limit storms.
 
 The current implementation does **not** prefetch beyond the current spine
 or unseen/unbuilt pages, and it has not yet been verified against real AI
