@@ -18,8 +18,8 @@ class TextBlock;
 // with immutable copies. The worker never touches Activity, Section or renderer.
 class AiSentencePrefetchSession {
  public:
-  AiSentencePrefetchSession(ai_prefetch::Scope scope, Section* section, uint32_t spine,
-                            int firstPage, uint32_t selectedWordOffset);
+  AiSentencePrefetchSession(ai_prefetch::Scope scope, Section* section, uint32_t spine, int firstPage,
+                            uint32_t selectedWordOffset);
   ~AiSentencePrefetchSession();
 
   void tick();

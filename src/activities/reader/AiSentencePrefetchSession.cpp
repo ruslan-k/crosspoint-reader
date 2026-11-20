@@ -65,7 +65,8 @@ bool memoryReady() {
 
 bool safeUrl(const std::string& url) {
   if (url.size() < 12 || url.size() > 255 || url.compare(0, 8, "https://") != 0 ||
-      url.find_first_of("?#@\r\n\t ") != std::string::npos) return false;
+      url.find_first_of("?#@\r\n\t ") != std::string::npos)
+    return false;
   return url[8] != '/' && url[8] != ':';
 }
 
@@ -107,8 +108,7 @@ esp_err_t onHttpEvent(esp_http_client_event_t* event) {
   auto* result = static_cast<Response*>(event->user_data);
   if (!result || result->cancel->load(std::memory_order_relaxed)) return ESP_FAIL;
   if (event->event_id != HTTP_EVENT_ON_DATA) return ESP_OK;
-  if (!result->data || event->data_len < 0 ||
-      static_cast<size_t>(event->data_len) > MAX_RESPONSE - result->size) {
+  if (!result->data || event->data_len < 0 || static_cast<size_t>(event->data_len) > MAX_RESPONSE - result->size) {
     result->overflow = true;
     return ESP_FAIL;
   }
@@ -155,8 +155,8 @@ std::string getOutput(const Response& response, bool gemini) {
   return output.size() <= 24 * 1024 ? output : std::string{};
 }
 
-bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini,
-                  const std::string& model, std::string& body) {
+bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, const std::string& model,
+                  std::string& body) {
   JsonDocument payload;
   JsonArray sentences = payload["sentences"].to<JsonArray>();
   for (size_t i = 0; i < batch.size(); ++i) {
@@ -181,7 +181,8 @@ bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini,
       "{\"items\":[{\"id\":0,\"translation\":\"...\","
       "\"words\":[{\"i\":0,\"translation\":\"...\"}]}]}. "
       "All input sentence IDs and word IDs must occur exactly once. "
-      "No commentary, examples, markdown, or reasoning.\n" + input;
+      "No commentary, examples, markdown, or reasoning.\n" +
+      input;
   JsonDocument request;
   if (gemini) {
     JsonObject item = request["contents"].to<JsonArray>().add<JsonObject>();
@@ -202,8 +203,7 @@ size_t processResponse(const std::string& raw, const ai_prefetch::Scope& scope,
                        const std::vector<ai_prefetch::Sentence>& input, std::atomic<bool>& cancel) {
   size_t start = raw.find('{');
   size_t end = raw.rfind('}');
-  if (start == std::string::npos || end == std::string::npos || end < start || end - start > 24 * 1024)
-    return 0;
+  if (start == std::string::npos || end == std::string::npos || end < start || end - start > 24 * 1024) return 0;
   JsonDocument result;
   if (deserializeJson(result, raw.substr(start, end - start + 1)) != DeserializationError::Ok) return 0;
   JsonArrayConst items = result["items"].as<JsonArrayConst>();
@@ -229,8 +229,8 @@ size_t processResponse(const std::string& raw, const ai_prefetch::Scope& scope,
       if (!word["i"].is<int>()) continue;
       const int i = word["i"].as<int>();
       const char* value = word["translation"].as<const char*>();
-      if (i < 0 || i >= static_cast<int>(record.words.size()) || mapped[i] ||
-          !value || !*value || strlen(value) > 256) continue;
+      if (i < 0 || i >= static_cast<int>(record.words.size()) || mapped[i] || !value || !*value || strlen(value) > 256)
+        continue;
       record.words[i].translation = value;
       mapped[i] = true;
       ++count;
@@ -343,10 +343,9 @@ void batchTask(void* argument) {
 }
 }  // namespace
 
-AiSentencePrefetchSession::AiSentencePrefetchSession(ai_prefetch::Scope scope, Section* section,
-                                                   uint32_t spine, int firstPage, uint32_t selectedWordOffset)
-    : scope_(std::move(scope)), section_(section), spine_(spine),
-      anchor_(selectedWordOffset), nextPage_(firstPage) {
+AiSentencePrefetchSession::AiSentencePrefetchSession(ai_prefetch::Scope scope, Section* section, uint32_t spine,
+                                                     int firstPage, uint32_t selectedWordOffset)
+    : scope_(std::move(scope)), section_(section), spine_(spine), anchor_(selectedWordOffset), nextPage_(firstPage) {
   batch_.reserve(ai_prefetch::BATCH_SENTENCES);
   current_.spine = spine_;
   ai_prefetch::Checkpoint saved;
@@ -391,7 +390,8 @@ bool AiSentencePrefetchSession::openPage() {
     for (uint16_t i = 0; i < block->wordCount(); ++i) {
       const auto r = block->wordSourceRange(i);
       if (r.start == UINT32_MAX || r.end == UINT32_MAX || r.end <= r.start ||
-          !clippingText::hasVisibleText(block->wordText(i))) continue;
+          !clippingText::hasVisibleText(block->wordText(i)))
+        continue;
       if (pageTokens_.size() >= MAX_PAGE_TOKENS) {
         disabled_ = true;
         page_.reset();
@@ -485,8 +485,8 @@ bool AiSentencePrefetchSession::launchBatch() {
 #else
   constexpr BaseType_t core = 0;
 #endif
-  const BaseType_t ok = xTaskCreatePinnedToCore(batchTask, "AiPrefetch", PREFETCH_STACK, holder,
-                                                tskIDLE_PRIORITY + 1, &task, core);
+  const BaseType_t ok =
+      xTaskCreatePinnedToCore(batchTask, "AiPrefetch", PREFETCH_STACK, holder, tskIDLE_PRIORITY + 1, &task, core);
   if (ok != pdPASS) {
     delete holder;
     LOG_INF("AI_PRE", "Skipping batch: low memory for task stack");
@@ -523,8 +523,7 @@ void AiSentencePrefetchSession::tick() {
   }
   size_t stepped = 0;
   while (page_ && tokenIndex_ < pageTokens_.size() && stepped++ < TOKENS_PER_TICK &&
-         batch_.size() < ai_prefetch::BATCH_SENTENCES &&
-         considered_ < ai_prefetch::WINDOW_SENTENCES) {
+         batch_.size() < ai_prefetch::BATCH_SENTENCES && considered_ < ai_prefetch::WINDOW_SENTENCES) {
     const Token token = pageTokens_[tokenIndex_++];
     acceptToken(token);
   }

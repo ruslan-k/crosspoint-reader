@@ -44,7 +44,7 @@ struct ClippingResult {
   enum class Action : uint8_t { Clip, Lookup, Bookmark, Translate };
   Action action = Action::Clip;
   std::string text;
-  std::string sentence;  // Only filled by Translate, never persisted as a clipping.
+  std::string sentence;                       // Only filled by Translate, never persisted as a clipping.
   uint32_t sentenceStartOffset = UINT32_MAX;  // Absolute source offset; needed to disambiguate repeat sentences.
   uint16_t startPageOffset = 0;
   uint16_t endPageOffset = 0;

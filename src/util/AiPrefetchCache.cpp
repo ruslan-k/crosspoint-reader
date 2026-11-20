@@ -13,7 +13,7 @@
 namespace ai_prefetch {
 namespace {
 constexpr char ROOT[] = "/.crosspoint/ai-prefetch";
-constexpr uint32_t RECORD_MAGIC = 0x31504641;  // AFP1
+constexpr uint32_t RECORD_MAGIC = 0x31504641;      // AFP1
 constexpr uint32_t CHECKPOINT_MAGIC = 0x31435041;  // APC1
 constexpr uint64_t HASH_SEED = UINT64_C(14695981039346656037);
 constexpr uint64_t HASH_PRIME = UINT64_C(1099511628211);
@@ -132,9 +132,8 @@ bool readRecord(const Scope& scope, const Sentence& needle, Sentence& loaded) {
   Header header{};
   bool ok = file.read(&header, sizeof(header)) == sizeof(header) && header.magic == RECORD_MAGIC &&
             header.scopeHash == scopeHash && header.keyHash == keyHash && header.spine == needle.spine &&
-            header.offset == needle.start && header.sourceBytes == needle.source.size() &&
-            header.translatedBytes > 0 && header.translatedBytes <= MAX_TRANSLATION &&
-            header.wordCount <= MAX_WORDS &&
+            header.offset == needle.start && header.sourceBytes == needle.source.size() && header.translatedBytes > 0 &&
+            header.translatedBytes <= MAX_TRANSLATION && header.wordCount <= MAX_WORDS &&
             file.fileSize() <= sizeof(header) + MAX_SENTENCE_BYTES + MAX_TRANSLATION +
                                    MAX_WORDS * (sizeof(WordHeader) + MAX_WORD_BYTES + MAX_WORD_TRANSLATION);
   if (!ok) return false;
@@ -143,8 +142,7 @@ bool readRecord(const Scope& scope, const Sentence& needle, Sentence& loaded) {
   loaded.start = header.offset;
   loaded.end = needle.end;
   uint64_t checksum = HASH_SEED;
-  ok = readPart(file, loaded.source, header.sourceBytes, checksum) &&
-       loaded.source == needle.source &&
+  ok = readPart(file, loaded.source, header.sourceBytes, checksum) && loaded.source == needle.source &&
        readPart(file, loaded.translation, header.translatedBytes, checksum);
   if (!ok) return false;
   loaded.words.reserve(header.wordCount);
@@ -152,14 +150,15 @@ bool readRecord(const Scope& scope, const Sentence& needle, Sentence& loaded) {
   for (uint32_t i = 0; i < header.wordCount; ++i) {
     WordHeader wh{};
     if (file.read(&wh, sizeof(wh)) != sizeof(wh) || !wh.sourceBytes || wh.sourceBytes > MAX_WORD_BYTES ||
-        !wh.translatedBytes || wh.translatedBytes > MAX_WORD_TRANSLATION ||
-        wh.offset < needle.start || wh.offset >= needle.end || (i && wh.offset < previousOffset))
+        !wh.translatedBytes || wh.translatedBytes > MAX_WORD_TRANSLATION || wh.offset < needle.start ||
+        wh.offset >= needle.end || (i && wh.offset < previousOffset))
       return false;
     checksum = hashBytes(checksum, &wh, sizeof(wh));
     Word word;
     word.offset = wh.offset;
     if (!readPart(file, word.source, wh.sourceBytes, checksum) ||
-        !readPart(file, word.translation, wh.translatedBytes, checksum)) return false;
+        !readPart(file, word.translation, wh.translatedBytes, checksum))
+      return false;
     previousOffset = wh.offset;
     loaded.words.push_back(std::move(word));
   }
@@ -174,8 +173,8 @@ bool has(const Scope& scope, const Sentence& sentence) {
   return readRecord(scope, sentence, loaded);
 }
 
-bool lookup(const Scope& scope, const Sentence& sentence, uint32_t selectedOffset,
-            std::string_view selectedWord, std::string& translatedWord, std::string& translatedSentence) {
+bool lookup(const Scope& scope, const Sentence& sentence, uint32_t selectedOffset, std::string_view selectedWord,
+            std::string& translatedWord, std::string& translatedSentence) {
   Sentence loaded;
   if (!readRecord(scope, sentence, loaded)) return false;
   for (const Word& word : loaded.words) {
@@ -199,14 +198,19 @@ bool save(const Scope& scope, const Sentence& s) {
   const std::string dest = filePath(scopeHash, keyHash);
   const std::string temp = dest + ".tmp";
 
-  Header header{RECORD_MAGIC, s.spine, s.start, static_cast<uint32_t>(s.source.size()),
-                static_cast<uint32_t>(s.translation.size()), static_cast<uint32_t>(s.words.size()),
-                scopeHash, keyHash, 0};
+  Header header{RECORD_MAGIC,
+                s.spine,
+                s.start,
+                static_cast<uint32_t>(s.source.size()),
+                static_cast<uint32_t>(s.translation.size()),
+                static_cast<uint32_t>(s.words.size()),
+                scopeHash,
+                keyHash,
+                0};
   uint64_t checksum = hashBytes(HASH_SEED, s.source.data(), s.source.size());
   checksum = hashBytes(checksum, s.translation.data(), s.translation.size());
   for (const Word& w : s.words) {
-    const WordHeader wh{w.offset, static_cast<uint16_t>(w.source.size()),
-                        static_cast<uint16_t>(w.translation.size())};
+    const WordHeader wh{w.offset, static_cast<uint16_t>(w.source.size()), static_cast<uint16_t>(w.translation.size())};
     checksum = hashBytes(checksum, &wh, sizeof(wh));
     checksum = hashBytes(checksum, w.source.data(), w.source.size());
     checksum = hashBytes(checksum, w.translation.data(), w.translation.size());
@@ -215,14 +219,13 @@ bool save(const Scope& scope, const Sentence& s) {
 
   HalFile file;
   if (!Storage.openFileForWrite("AI_PRE", temp, file)) return false;
-  bool ok = file.write(&header, sizeof(header)) == sizeof(header) &&
-            writePart(file, s.source) && writePart(file, s.translation);
+  bool ok = file.write(&header, sizeof(header)) == sizeof(header) && writePart(file, s.source) &&
+            writePart(file, s.translation);
   for (const Word& word : s.words) {
     if (!ok) break;
     const WordHeader wh{word.offset, static_cast<uint16_t>(word.source.size()),
                         static_cast<uint16_t>(word.translation.size())};
-    ok = file.write(&wh, sizeof(wh)) == sizeof(wh) &&
-         writePart(file, word.source) && writePart(file, word.translation);
+    ok = file.write(&wh, sizeof(wh)) == sizeof(wh) && writePart(file, word.source) && writePart(file, word.translation);
   }
   if (ok) file.flush();
   file.close();
@@ -236,9 +239,9 @@ bool loadCheckpoint(const Scope& scope, Checkpoint& out) {
   HalFile file;
   if (!Storage.openFileForRead("AI_PRE", directory(scopeHash) + "/checkpoint.bin", file)) return false;
   DiskCheckpoint c{};
-  if (file.fileSize() != sizeof(c) || file.read(&c, sizeof(c)) != sizeof(c) ||
-      c.magic != CHECKPOINT_MAGIC || c.scopeHash != scopeHash || c.reserved != 0 ||
-      c.scanned > WINDOW_SENTENCES || c.nextOffset < c.anchor) return false;
+  if (file.fileSize() != sizeof(c) || file.read(&c, sizeof(c)) != sizeof(c) || c.magic != CHECKPOINT_MAGIC ||
+      c.scopeHash != scopeHash || c.reserved != 0 || c.scanned > WINDOW_SENTENCES || c.nextOffset < c.anchor)
+    return false;
   const uint64_t check = hashBytes(HASH_SEED, &c, sizeof(c) - sizeof(c.checksum));
   if (check != c.checksum) return false;
   out = {c.spine, c.anchor, c.nextOffset, static_cast<uint16_t>(c.scanned)};

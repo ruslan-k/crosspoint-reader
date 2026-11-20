@@ -57,8 +57,9 @@ AiPopupRect aiPopupRect(const GfxRenderer& renderer) {
 
 int aiPopupFont(const GfxRenderer& renderer) {
   // Ubuntu 10 includes Cyrillic; keep Noto 12 as a fallback on lean builds.
-  return renderer.getFontMap().count(UI_10_FONT_ID) ? UI_10_FONT_ID
-         : renderer.getFontMap().count(NOTOSANS_12_FONT_ID) ? NOTOSANS_12_FONT_ID : NOTOSANS_14_FONT_ID;
+  return renderer.getFontMap().count(UI_10_FONT_ID)         ? UI_10_FONT_ID
+         : renderer.getFontMap().count(NOTOSANS_12_FONT_ID) ? NOTOSANS_12_FONT_ID
+                                                            : NOTOSANS_14_FONT_ID;
 }
 
 constexpr int AI_POPUP_TITLE_HEIGHT = 46;
@@ -332,8 +333,8 @@ void AiSentenceTranslationActivity::onEnter() {
   // No radio, TLS, or renderer work for a cached exact word+sentence.
   // A book/provider/model change has a separate on-disk namespace.
   std::string cachedWord, cachedSentence;
-  if (ai_translation_cache::load(bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel(),
-                                 word_, sentence_, cachedWord, cachedSentence)) {
+  if (ai_translation_cache::load(bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel(), word_,
+                                 sentence_, cachedWord, cachedSentence)) {
     openResult(std::move(cachedWord), std::move(cachedSentence));
     return;
   }
@@ -622,8 +623,8 @@ void AiSentenceTranslationActivity::openResult(std::string wordTranslation, std:
   // later UI loop tick. The session exists ONLY while this modal is active.
   if (!prefetch_ && origin_.section && origin_.selectedWordOffset != UINT32_MAX) {
     ai_prefetch::Scope scope{bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel()};
-    prefetch_ = makeUniqueNoThrow<AiSentencePrefetchSession>(
-        std::move(scope), origin_.section, origin_.spine, origin_.firstPage, origin_.selectedWordOffset);
+    prefetch_ = makeUniqueNoThrow<AiSentencePrefetchSession>(std::move(scope), origin_.section, origin_.spine,
+                                                             origin_.firstPage, origin_.selectedWordOffset);
   }
 #endif
 }
@@ -683,8 +684,8 @@ void AiSentenceTranslationActivity::loop() {
     // Save only validated provider output; failed/partial results never enter the cache.
     // This happens after queuing the popup render, so the first result is not
     // delayed by filesystem housekeeping.
-    ai_translation_cache::save(bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel(),
-                               word_, sentence_, wordTranslation_, sentenceTranslation_);
+    ai_translation_cache::save(bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel(), word_,
+                               sentence_, wordTranslation_, sentenceTranslation_);
   }
 }
 

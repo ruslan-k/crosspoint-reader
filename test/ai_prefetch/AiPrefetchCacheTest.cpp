@@ -1,8 +1,10 @@
-#include <gtest/gtest.h>
 #include <HalStorage.h>
+#include <gtest/gtest.h>
+
 #include <filesystem>
 #include <fstream>
 #include <string>
+
 #include "AiPrefetchCache.h"
 
 using namespace ai_prefetch;
@@ -68,7 +70,10 @@ TEST_F(AiPrefetchCacheTest, CorruptionFailsClosed) {
   ASSERT_TRUE(save(scope(), s));
   std::filesystem::path item;
   for (const auto& entry : std::filesystem::recursive_directory_iterator(HalStorage::root())) {
-    if (entry.path().extension() == ".bin") { item = entry.path(); break; }
+    if (entry.path().extension() == ".bin") {
+      item = entry.path();
+      break;
+    }
   }
   ASSERT_FALSE(item.empty());
   {

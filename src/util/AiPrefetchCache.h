@@ -38,8 +38,8 @@ struct Sentence {
 // All lookups validate content, scope, lengths and checksums, not just hashes.
 // SD access is permitted only inside Translate (never on a page-turn path).
 bool has(const Scope& scope, const Sentence& sentence);
-bool lookup(const Scope& scope, const Sentence& sentence, uint32_t selectedOffset,
-            std::string_view selectedWord, std::string& translatedWord, std::string& translatedSentence);
+bool lookup(const Scope& scope, const Sentence& sentence, uint32_t selectedOffset, std::string_view selectedWord,
+            std::string& translatedWord, std::string& translatedSentence);
 bool save(const Scope& scope, const Sentence& sentence);
 
 struct Checkpoint {

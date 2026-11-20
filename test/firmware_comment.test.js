@@ -128,9 +128,9 @@ test('empty newer baseline does not hide an older usable measurement', async () 
   assert.match(await comparison(f), /\+10 \/ -10 B/);
 });
 
-test('queued publishers in completion order 19, 21, 20 retain the latest comment', async () => {
+test('cancelled or superseded PR publishers cannot overwrite the latest comment', async () => {
   const workflow = require('node:fs').readFileSync('.github/workflows/pr-firmware-links.yml', 'utf8');
-  assert.match(workflow, /queue: max/);
+  assert.match(workflow, /cancel-in-progress:\s*true/);
   for (const id of [19, 21, 20]) {
     const f = fixture(); f.run.id = id;
     const paginate = f.github.paginate;

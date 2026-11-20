@@ -29,7 +29,11 @@ class HalFile {
   }
   size_t position() { return static_cast<size_t>(file_.tellg()); }
   void flush() { file_.flush(); }
-  bool close() { file_.close(); return true; }
+  bool close() {
+    file_.close();
+    return true;
+  }
+
  private:
   std::fstream file_;
 };
