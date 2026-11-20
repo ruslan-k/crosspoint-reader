@@ -18,6 +18,10 @@ on:
           - eego_a4
           - picco
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.device }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

@@ -13,6 +13,10 @@ on:
 env:
   FONTS_REPO: crosspoint-reader/crosspoint-fonts
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-fonts:
     runs-on: ubuntu-latest
