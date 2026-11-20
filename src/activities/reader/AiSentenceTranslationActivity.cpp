@@ -28,6 +28,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/AiApiEndpoint.h"
+#include "util/AiTranslationCache.h"
 #include "util/AiTranslationRoots.h"
 
 namespace {
@@ -191,10 +192,12 @@ bool extractTranslationText(const std::string& raw, std::string& word, std::stri
 }  // namespace
 
 AiSentenceTranslationActivity::AiSentenceTranslationActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                                             std::string word, std::string sentence)
+                                                             std::string word, std::string sentence,
+                                                             std::string bookPath)
     : Activity("AiSentenceTranslation", renderer, mappedInput),
       word_(std::move(word)),
-      sentence_(std::move(sentence)) {}
+      sentence_(std::move(sentence)),
+      bookPath_(std::move(bookPath)) {}
 
 AiSentenceTranslationActivity::~AiSentenceTranslationActivity() { releaseBackground(); }
 
@@ -321,6 +324,15 @@ void AiSentenceTranslationActivity::onEnter() {
   }
   if (sentence_.empty() || sentence_.size() > MAX_SENTENCE_BYTES || word_.empty()) {
     fail(tr(STR_AI_BAD_RESPONSE));
+    return;
+  }
+
+  // No radio, TLS, or renderer work for a cached exact word+sentence.
+  // A book/provider/model change has a separate on-disk namespace.
+  std::string cachedWord, cachedSentence;
+  if (ai_translation_cache::load(bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel(),
+                                 word_, sentence_, cachedWord, cachedSentence)) {
+    openResult(std::move(cachedWord), std::move(cachedSentence));
     return;
   }
 
@@ -636,6 +648,11 @@ void AiSentenceTranslationActivity::loop() {
   std::string sentenceTranslation;
   if (translate(wordTranslation, sentenceTranslation)) {
     openResult(std::move(wordTranslation), std::move(sentenceTranslation));
+    // Save only validated provider output; failed/partial results never enter the cache.
+    // This happens after queuing the popup render, so the first result is not
+    // delayed by filesystem housekeeping.
+    ai_translation_cache::save(bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel(),
+                               word_, sentence_, wordTranslation_, sentenceTranslation_);
   }
 }
 
