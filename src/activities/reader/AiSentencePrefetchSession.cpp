@@ -38,7 +38,10 @@ namespace {
 constexpr size_t MAX_BATCH_BODY = 24 * 1024;
 constexpr size_t MAX_RESPONSE = 48 * 1024;
 constexpr int HTTP_TIMEOUT_MS = 60000;
-constexpr int HTTP_STEP_TIMEOUT_MS = 100;
+// Async ESP-IDF returns HTTP_INCOMPLETE_DATA when a TLS read times out
+// mid-SSE-chunk. 100 ms caused every OpenCode Go lookahead batch to fail.
+// Socket idle limit is distinct from the 60-second overall request budget.
+constexpr int HTTP_READ_IDLE_TIMEOUT_MS = 30000;
 constexpr uint32_t MIN_INTERNAL_IN_FLIGHT = 15 * 1024;
 // Cooperative client uses the existing Translate task stack, unlike the old worker.
 constexpr uint32_t MIN_INTERNAL_FREE = 94 * 1024;
@@ -49,6 +52,11 @@ constexpr size_t TOKENS_PER_TICK = 48;
 constexpr size_t MAX_PAGE_TOKENS = 320;
 constexpr size_t SSE_LINE_CAP = 8 * 1024;
 constexpr size_t JSON_OBJECT_CAP = 24 * 1024;
+
+// Temporary per-endpoint fallback: if chunked SSE transport fails, request
+// ordinary completion JSON on later Translate sessions, without retrying a
+// potentially billable request immediately.
+std::string gNonStreamingEndpoint;
 
 // Never compete with the reader for its last heap blocks. TLS needs internal
 // buffers even when JSON and the HTTP body are backed by Picco PSRAM.
@@ -70,7 +78,7 @@ bool safeUrl(const std::string& url) {
   return url[8] != '/' && url[8] != ':';
 }
 
-bool buildUrl(std::string& url, const std::string& model, bool& gemini) {
+bool buildUrl(std::string& url, const std::string& model, bool& gemini, bool streaming) {
   url = ai_endpoint::migrateOpenCodeGoUrl(url);
   if (!safeUrl(url)) return false;
   gemini = url == "https://generativelanguage.googleapis.com" ||
@@ -80,7 +88,11 @@ bool buildUrl(std::string& url, const std::string& model, bool& gemini) {
     const auto pos = url.find("/models/");
     if (pos != std::string::npos) url.resize(pos);
     if (url.back() == '/') url.pop_back();
-    url += "/models/" + model + ":streamGenerateContent?alt=sse";
+    if (streaming) {
+      url += "/models/" + model + ":streamGenerateContent?alt=sse";
+    } else {
+      url += "/models/" + model + ":generateContent?fields=candidates.content.parts.text";
+    }
   } else {
     if (url.back() == '/') url.pop_back();
     if (!url.ends_with("/chat/completions")) url += "/chat/completions";
@@ -155,8 +167,8 @@ std::string getOutput(const Response& response, bool gemini) {
   return output.size() <= 24 * 1024 ? output : std::string{};
 }
 
-bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, const std::string& model, char* body,
-                  size_t capacity, size_t& bodyBytes) {
+bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, bool streaming,
+                  const std::string& model, char* body, size_t capacity, size_t& bodyBytes) {
   // All large serialization buffers are in PSRAM. No intermediate ArduinoJson
   // documents, copied prompt strings or payload strings occupy internal heap.
   auto promptBuffer = HalMemory::allocatePsram(17 * 1024);
@@ -194,7 +206,8 @@ bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, 
       return false;
   } else {
     if (!request.append("{\"model\":") || !request.quoted(model) ||
-        !request.append(",\"max_tokens\":6144,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":") ||
+        !request.append(streaming ? ",\"max_tokens\":6144,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":"
+                                  : ",\"max_tokens\":6144,\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":") ||
         !request.quoted(prompt.view()) || !request.append("}]}"))
       return false;
   }
@@ -250,6 +263,7 @@ struct AiSentencePrefetchSession::Job {
   size_t bodyBytes = 0;
   std::string auth;
   bool gemini = false;
+  bool streaming = true;
   std::atomic<bool> cancel{false};
   Response response{&cancel};
   esp_http_client_handle_t client = nullptr;
@@ -257,6 +271,8 @@ struct AiSentencePrefetchSession::Job {
   bool classified = false;
   bool rawNonStreaming = false;
   bool parseError = false;
+  uint32_t sseFrames = 0;
+  uint32_t textParts = 0;
   bool stored[ai_prefetch::BATCH_SENTENCES] = {};
   uint8_t accepted[ai_prefetch::BATCH_SENTENCES] = {};
   char* sseLine = static_cast<char*>(heap_caps_malloc(SSE_LINE_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -329,10 +345,12 @@ void AiSentencePrefetchSession::consumeStream() {
   if (job.rawNonStreaming) return;  // Buffer full ordinary JSON until HTTP completes.
   const bool ok = job.framer->feedSse(buffer.data, buffer.size, [&](std::string_view frame) {
     if (job.parseError) return;
+    ++job.sseFrames;
     JsonDocument chunk;
     if (deserializeJson(chunk, frame.data(), frame.size()) != DeserializationError::Ok) return;
     const auto feedText = [&](const char* text) {
       if (!text || job.parseError) return;
+      ++job.textParts;
       if (!job.framer->feedModel(text, strlen(text), [&](std::string_view record) { acceptStreamObject(record); })) {
         job.parseError = true;
       }
@@ -422,9 +440,15 @@ void AiSentencePrefetchSession::pollBatch() {
   for (size_t i = 0; i < job.batch.size(); ++i) {
     if (job.stored[i]) ++savedCount;
   }
-  LOG_INF("AI_PRE", "Stream stored %u/%u sentences, HTTP=%d transport=%d%s", static_cast<unsigned>(savedCount),
-          static_cast<unsigned>(job.batch.size()), status, static_cast<int>(result),
+  LOG_INF("AI_PRE", "Stream stored %u/%u sentences, HTTP=%d transport=%d frames=%u parts=%u%s",
+          static_cast<unsigned>(savedCount), static_cast<unsigned>(job.batch.size()), status,
+          static_cast<int>(result), static_cast<unsigned>(job.sseFrames), static_cast<unsigned>(job.textParts),
           job.parseError ? " parse-limit" : "");
+  if (job.streaming && status == 200 && savedCount == 0 &&
+      (result == ESP_ERR_HTTP_INCOMPLETE_DATA || result == ESP_OK)) {
+    gNonStreamingEndpoint = job.scope.url;
+    LOG_INF("AI_PRE", "SSE incomplete/unusable; next Translate uses non-streaming JSON");
+  }
   const bool complete = result == ESP_OK && status == 200 && savedCount == job.batch.size();
   worker_.reset();
   if (!complete) disabled_ = true;  // Retry missing pieces on next Translate.
@@ -591,18 +615,20 @@ bool AiSentencePrefetchSession::launchBatch() {
   batch_.clear();
   batch_.reserve(ai_prefetch::BATCH_SENTENCES);
   job->url = job->scope.url;
-  const bool endpointReady = buildUrl(job->url, job->scope.model, job->gemini);
+  job->streaming = job->scope.url != gNonStreamingEndpoint;
+  if (!job->streaming) LOG_INF("AI_PRE", "Using non-streaming compatibility mode for this endpoint");
+  const bool endpointReady = buildUrl(job->url, job->scope.model, job->gemini, job->streaming);
   bool requestReady =
-      endpointReady && buildRequest(job->batch, job->gemini, job->scope.model, reinterpret_cast<char*>(job->body.get()),
-                                    MAX_BATCH_BODY, job->bodyBytes);
+      endpointReady && buildRequest(job->batch, job->gemini, job->streaming, job->scope.model,
+                                    reinterpret_cast<char*>(job->body.get()), MAX_BATCH_BODY, job->bodyBytes);
   while (!requestReady && job->batch.size() > 1 && endpointReady) {
     // A long paragraph may exceed the fixed request cap. Preserve FIFO
     // priority and split into smaller packets rather than dropping the entire
     // 100-sentence lookahead window.
     batch_.insert(batch_.begin(), std::move(job->batch.back()));
     job->batch.pop_back();
-    requestReady = buildRequest(job->batch, job->gemini, job->scope.model, reinterpret_cast<char*>(job->body.get()),
-                                MAX_BATCH_BODY, job->bodyBytes);
+    requestReady = buildRequest(job->batch, job->gemini, job->streaming, job->scope.model,
+                                reinterpret_cast<char*>(job->body.get()), MAX_BATCH_BODY, job->bodyBytes);
   }
   if (!requestReady || !job->response.data || !job->framer || !trustedtime::trustedNow()) {
     // Do not reapply the 94 KiB preflight AFTER allocating JSON and response
@@ -623,7 +649,7 @@ bool AiSentencePrefetchSession::launchBatch() {
   cfg.url = job->url.c_str();
   cfg.method = HTTP_METHOD_POST;
   cfg.is_async = true;
-  cfg.timeout_ms = HTTP_STEP_TIMEOUT_MS;
+  cfg.timeout_ms = HTTP_READ_IDLE_TIMEOUT_MS;
   cfg.cert_pem = ai_translation::ROOTS;
   cfg.skip_cert_common_name_check = false;
   cfg.disable_auto_redirect = true;
@@ -639,7 +665,8 @@ bool AiSentencePrefetchSession::launchBatch() {
   }
   esp_err_t result = esp_http_client_set_header(job->client, "Content-Type", "application/json");
   if (result == ESP_OK) result = esp_http_client_set_header(job->client, "User-Agent", "CrossPoint-AI-Prefetch");
-  if (result == ESP_OK) result = esp_http_client_set_header(job->client, "Accept", "text/event-stream");
+  if (result == ESP_OK)
+    result = esp_http_client_set_header(job->client, "Accept", job->streaming ? "text/event-stream" : "application/json");
   if (result == ESP_OK && job->gemini) {
     result = esp_http_client_set_header(job->client, "x-goog-api-key", AI_TRANSLATION_STORE.getKey().c_str());
   } else if (result == ESP_OK) {
@@ -663,7 +690,8 @@ bool AiSentencePrefetchSession::launchBatch() {
     return false;
   }
   job->startedAt = millis();
-  LOG_INF("AI_PRE", "Batch started: count=%u internal=%u largest=%u", static_cast<unsigned>(job->batch.size()),
+  LOG_INF("AI_PRE", "Batch started: count=%u mode=%s idle_timeout=%d internal=%u largest=%u",
+          static_cast<unsigned>(job->batch.size()), job->streaming ? "sse" : "json", HTTP_READ_IDLE_TIMEOUT_MS,
           static_cast<unsigned>(HalMemory::getInternalHeap().freeBytes),
           static_cast<unsigned>(HalMemory::getInternalHeap().largestBlockBytes));
   worker_ = std::move(job);
