@@ -54,11 +54,13 @@ AiPopupRect aiPopupRect(const GfxRenderer& renderer) {
 }
 
 int aiPopupFont(const GfxRenderer& renderer) {
-  return renderer.getFontMap().count(NOTOSANS_12_FONT_ID) ? NOTOSANS_12_FONT_ID : NOTOSANS_14_FONT_ID;
+  // Ubuntu 10 includes Cyrillic; keep Noto 12 as a fallback on lean builds.
+  return renderer.getFontMap().count(UI_10_FONT_ID) ? UI_10_FONT_ID
+         : renderer.getFontMap().count(NOTOSANS_12_FONT_ID) ? NOTOSANS_12_FONT_ID : NOTOSANS_14_FONT_ID;
 }
 
 constexpr int AI_POPUP_TITLE_HEIGHT = 46;
-constexpr int AI_POPUP_FOOTER_HEIGHT = 32;
+constexpr int AI_POPUP_FOOTER_HEIGHT = 0;
 constexpr int AI_POPUP_PADDING = 15;
 
 // Do not send model output or the full provider error body to serial. Only
@@ -280,7 +282,6 @@ void AiSentenceTranslationActivity::drawPopup() const {
   renderer.drawRoundedRect(rect.x, rect.y, rect.width, rect.height, 2, 5, true);
   renderer.drawText(NOTOSANS_14_FONT_ID, rect.x + AI_POPUP_PADDING, rect.y + 11, tr(STR_AI_TRANSLATE), true,
                     EpdFontFamily::BOLD);
-  renderer.drawText(UI_12_FONT_ID, rect.x + rect.width - 48, rect.y + 13, "Close");
   renderer.drawLine(rect.x + 12, rect.y + AI_POPUP_TITLE_HEIGHT, rect.x + rect.width - 12,
                     rect.y + AI_POPUP_TITLE_HEIGHT, true);
 
@@ -303,14 +304,6 @@ void AiSentenceTranslationActivity::drawPopup() const {
     const int offset = (bodyHeight - thumb) * popupScroll_ / extra;
     renderer.fillRect(rect.x + rect.width - 9, bodyTop + offset, 3, thumb);
   }
-  renderer.drawLine(rect.x + 12, rect.y + rect.height - AI_POPUP_FOOTER_HEIGHT, rect.x + rect.width - 12,
-                    rect.y + rect.height - AI_POPUP_FOOTER_HEIGHT);
-  char progress[32];
-  snprintf(progress, sizeof(progress), "%d-%d / %u", popupLines_.empty() ? 0 : popupScroll_ + 1,
-           std::min<int>(popupLines_.size(), popupScroll_ + popupVisibleLines_),
-           static_cast<unsigned>(popupLines_.size()));
-  renderer.drawText(UI_10_FONT_ID, rect.x + AI_POPUP_PADDING, rect.y + rect.height - 25, progress);
-  renderer.drawText(UI_10_FONT_ID, rect.x + rect.width - 130, rect.y + rect.height - 25, "Swipe to scroll");
 }
 
 void AiSentenceTranslationActivity::fail(std::string reason) {
@@ -625,8 +618,7 @@ void AiSentenceTranslationActivity::loop() {
     int y = -1;
     if (mappedInput.wasScreenTapped(x, y)) {
       const AiPopupRect rect = aiPopupRect(renderer);
-      if (x < rect.x || x >= rect.x + rect.width || y < rect.y || y >= rect.y + rect.height ||
-          (y < rect.y + AI_POPUP_TITLE_HEIGHT && x >= rect.x + rect.width - 70)) {
+      if (x < rect.x || x >= rect.x + rect.width || y < rect.y || y >= rect.y + rect.height) {
         finish();
       } else if (y >= rect.y + AI_POPUP_TITLE_HEIGHT && y < rect.y + rect.height - AI_POPUP_FOOTER_HEIGHT) {
         // Taps on the upper/lower half scroll a few lines; swipes scroll a page.
