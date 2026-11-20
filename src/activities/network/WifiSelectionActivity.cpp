@@ -27,8 +27,11 @@ constexpr fui::ActionId ACTION_PROMPT = 3;
 }  // namespace
 
 WifiSelectionActivity::WifiSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                             const bool autoConnect)
-    : Activity("WifiSelection", renderer, mappedInput), UiAppHost(renderer), allowAutoConnect(autoConnect) {}
+                                             const bool autoConnect, const bool compactAutoStatus)
+    : Activity("WifiSelection", renderer, mappedInput),
+      UiAppHost(renderer),
+      allowAutoConnect(autoConnect),
+      compactAutoStatus(compactAutoStatus) {}
 
 void WifiSelectionActivity::onRowEvent(const fui::ActionEvent& event, void* user) {
   auto* self = static_cast<WifiSelectionActivity*>(user);
@@ -841,6 +844,14 @@ void WifiSelectionActivity::render(RenderLock&&) {
   // Don't render if we're in a keyboard-entry state - we're just transitioning
   // from the keyboard subactivity back to the main activity
   if (state == WifiSelectionState::PASSWORD_ENTRY || state == WifiSelectionState::HIDDEN_SSID_ENTRY) {
+    return;
+  }
+
+  // Reuse the existing asynchronous saved-network flow, hiding the full Wi-Fi
+  // screen until all saved networks have failed or the user requests the list.
+  if (compactAutoStatus && autoConnecting &&
+      (state == WifiSelectionState::SCANNING || state == WifiSelectionState::AUTO_CONNECTING)) {
+    GUI.drawPopup(renderer, tr(STR_AI_WIFI_CONNECTING));
     return;
   }
 

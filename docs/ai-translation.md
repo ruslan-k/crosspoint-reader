@@ -39,6 +39,16 @@ An already-complete `/chat/completions` URL is also accepted.
 - Outbound requests use wolfSSL TLS chain and hostname verification with a
   small built-in CA set (GTS R1, ISRG Root X1, DigiCert Global Root G2).
   Unrecognised CA chains fail closed; no `setInsecure()` fallback.
+- Wi-Fi starts on demand. The translation activity first tries the last
+  successfully connected saved network, then asynchronously scans for other
+  saved networks. During automatic reconnect, a compact status popup overlays
+  the existing screen instead of opening the full Wi-Fi UI. The standard
+  connection/selection screen appears only after saved-network attempts fail,
+  or immediately when the user presses Confirm. Back cancels the selection.
+- During the AI request, a compact `Translating...` popup is displayed; the
+  translated word and Original/Translation page opens on success.
+- Wi-Fi is switched off when leaving the translation if it was started by
+  this activity. Pre-existing Wi-Fi sessions are left running.
 - Translation requires active Wi-Fi and a valid system clock. API quotas
   and billing are controlled by the respective provider.
 

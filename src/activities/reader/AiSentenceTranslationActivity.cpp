@@ -3,12 +3,12 @@
 #include <ArduinoJson.h>
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
-#include <HalClock.h>
 #include <HalMemory.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <SecureHttpClient.h>
+#include <TrustedTime.h>
 #include <WiFi.h>
 
 #include <algorithm>
@@ -90,7 +90,7 @@ void AiSentenceTranslationActivity::onEnter() {
     return;
   }
 
-  if (auto* fontCache = renderer.getFontCacheManager()) fontCache->releaseAllFontMemory();
+  if (auto* fontCache = renderer.getFontCacheManager()) fontCache->releaseSdFontCaches();
 
   if (WiFi.status() == WL_CONNECTED) {
     state_ = State::Translating;
@@ -101,13 +101,16 @@ void AiSentenceTranslationActivity::onEnter() {
 
   wifiOwned_ = true;
   state_ = State::Connecting;
-  auto wifi = makeUniqueNoThrow<WifiSelectionActivity>(renderer, mappedInput, true);
+  auto wifi = makeUniqueNoThrow<WifiSelectionActivity>(renderer, mappedInput, true, true);
   if (!wifi) {
     fail(tr(STR_AI_LOW_MEMORY));
     return;
   }
   startActivityForResult(std::move(wifi), [this](const ActivityResult& result) {
-    if (result.isCancelled || WiFi.status() != WL_CONNECTED) {
+    if (result.isCancelled) {
+      // Manual Wi-Fi selection cancelled: return directly to the EPUB reader.
+      finish();
+    } else if (WiFi.status() != WL_CONNECTED) {
       fail(tr(STR_AI_NETWORK_FAILED));
     } else {
       state_ = State::Translating;
@@ -118,11 +121,11 @@ void AiSentenceTranslationActivity::onEnter() {
 }
 
 bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std::string& sentenceTranslation) {
-  if (!HalClock::systemTimeValid() && !halClock.syncFromNTP()) {
+  if (!trustedtime::trustedNow() && !trustedtime::syncNow(5000)) {
     fail(tr(STR_AI_CLOCK_ERROR));
     return false;
   }
-  if (auto* fontCache = renderer.getFontCacheManager()) fontCache->releaseAllFontMemory();
+  if (auto* fontCache = renderer.getFontCacheManager()) fontCache->releaseSdFontCaches();
   const auto heap = HalMemory::getDefaultHeap();
   if (heap.freeBytes < MIN_FREE_FOR_TLS || heap.largestBlockBytes < MIN_BLOCK_FOR_TLS) {
     fail(tr(STR_AI_LOW_MEMORY));
@@ -283,6 +286,13 @@ void AiSentenceTranslationActivity::onExit() {
 }
 
 void AiSentenceTranslationActivity::render(RenderLock&&) {
+  // Compact progress indicator rather than a full-screen loading activity.
+  // Clear a previous manual network chooser if one was shown.
+  if (state_ == State::Translating) {
+    renderer.clearScreen();
+    GUI.drawPopup(renderer, tr(STR_AI_TRANSLATING));
+    return;
+  }
   renderer.clearScreen();
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect area = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
