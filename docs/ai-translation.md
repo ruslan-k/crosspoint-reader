@@ -154,6 +154,44 @@ The popup is now drawn directly by `AiSentenceTranslationActivity`; it does
 not use `DictionaryDefinitionActivity`. Its word wrapping and scrolling are
 bounded, and the chosen Ubuntu 10pt font includes Cyrillic glyphs.
 
+### Priority Streaming Cache v2 (Picco, 2026-11-21)
+
+The previous all-or-nothing four-sentence prefetch repeatedly logged
+\`[AI_PRE] Batch skipped: bad endpoint, clock or low RAM\` even when
+foreground translation succeeded. It duplicated JSON prompts in internal RAM
+and refused a valid sentence if *any* contextual word was missing.
+
+The new implementation uses:
+- **100-sentence lookahead**, sorted by source offset, with the **nearest four
+  missing/partial sentences** requested first.
+- **SSE streaming** for OpenAI-compatible \`chat/completions\` (\`stream=true\`)
+  and Gemini \`streamGenerateContent?alt=sse\`, parsed incrementally from
+  bounded PSRAM buffers. Gateways ignoring streaming can still return a normal
+  complete JSON response, which is parsed without issuing another request.
+- A compact per-sentence JSON object as soon as the model emits it. Each
+  validated sentence and/or individual translated word is **atomically merged**
+  with its prior cache record. The preexisting \`AFP1\` disk format remains
+  readable, including previous complete entries. Incomplete word mappings do
+  **not** erase translated sentences or previously completed words.
+- Only **untranslated words** and a \`need_sentence\` flag enter subsequent
+  requests. A corrupt or missing record is scanned again; the checkpoint is
+  advisory and never suppresses a missing record.
+- A fixed-capacity JSON writer builds input directly in PSRAM, with no large
+  temporary request documents/strings on the internal heap. HTTPS remains
+  cooperative inside Translate; there is at most one in-flight request.
+- If internal RAM is too low to persist a streamed record while TLS is alive,
+  keep the finished JSON record temporarily in PSRAM and write it after
+  disconnecting TLS, including when Translate closes. Incomplete stream
+  fragments are discarded and never cached.
+
+**Not a guarantee:** a model must emit a complete JSON object before Translate
+closes for that entry to become durable. Some gateways ignore SSE or stop
+before the first object; they cannot supply an offline result in that case.
+Watch \`[AI_PRE] Stream item saved\`, \`Deferred stream item saved\`, and
+\`Stream stored N/4\`. All source and translation text remains plaintext on
+the microSD (under the protected \`/.crosspoint/ai-prefetch/\` tree).
+
+
 ### Picco lookahead prefetch (100 / 4 / Translate-only)
 
 Implementation settings are fixed for Picco:

@@ -30,11 +30,18 @@ for banned in ("xTaskCreate", "vTaskDelete", "gPrefetchHttpBusy", "page_ = secti
 assert "ai_prefetch::WINDOW_SENTENCES" in prefetch
 assert "ai_prefetch::BATCH_SENTENCES" in prefetch
 assert "saveCheckpoint(job.scope, job.checkpoint)" in prefetch
-assert "ai_prefetch::has(scope_, current_)" in prefetch
+assert "ai_prefetch::pending(scope_, current_, delta)" in prefetch
 assert "if (prefetch_) prefetch_->tick();" in activity
 assert "prefetch_->cancel();" in activity
 assert "Foreground translation cache save: %s" in activity
 assert "Exact translation cache hit" in activity
 assert "Prefetched translation cache hit" in activity
 assert "Storage.exists(path.c_str())" in cache
+assert "StreamFramer" in prefetch
+assert "saveItem(item, job.scope, job.batch, job.stored)" in prefetch
+assert "flushDeferred();" in prefetch
+assert "request[\"stream\"]" not in prefetch  # fixed-buffer PSRAM writer, not ArduinoJson docs
+assert "\"stream\\\":true" in prefetch
+assert "BoundedJsonWriter" in prefetch
+assert "HalMemory::allocatePsram(MAX_BATCH_BODY)" in prefetch
 print("Picco cooperative prefetch source guards passed")

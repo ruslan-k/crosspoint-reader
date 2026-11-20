@@ -60,7 +60,10 @@ TEST(AiPrefetchStream, SkipsMarkdownAndRespectsEscapes) {
   char objects[4096] = {};
   ai_prefetch::StreamFramer framer(events, sizeof(events), objects, sizeof(objects));
   std::vector<std::string> data;
-  const std::string response = "begin\n\`\`\`json\n{\"id\":0,\"translation\":\"quote: \\\\\" } \"}\n\`\`\`";
+  const std::string response = R"JSON(begin
+json
+{"id":0,"translation":"quote: \\" } "}
+end)JSON";
   EXPECT_TRUE(framer.feedModel(response.data(), response.size(),
                                [&](std::string_view record) { data.emplace_back(record); }));
   EXPECT_EQ(data.size(), 1u);

@@ -161,7 +161,7 @@ bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, 
   // documents, copied prompt strings or payload strings occupy internal heap.
   auto promptBuffer = HalMemory::allocatePsram(17 * 1024);
   if (!promptBuffer || !body) return false;
-  ai_prefetch::BoundedJsonWriter prompt(promptBuffer.get(), 17 * 1024);
+  ai_prefetch::BoundedJsonWriter prompt(reinterpret_cast<char*>(promptBuffer.get()), 17 * 1024);
   if (!prompt.append(
           "Translate the numbered source text into Russian. Return one compact, standalone JSON object "
           "per sentence (NDJSON), in increasing id order, as soon as each is ready. "
@@ -362,7 +362,20 @@ void AiSentencePrefetchSession::flushDeferred() {
     JsonDocument parsed;
     const bool valid =
         deserializeJson(parsed, job.deferred[id], job.deferredBytes[id]) == DeserializationError::Ok;
-    if (valid && saveItem(parsed.as<JsonVariantConst>(), job.scope, job.batch, job.stored)) {
+    bool saved = false;
+    if (valid) {
+      JsonArrayConst items = parsed["items"].as<JsonArrayConst>();
+      if (items.isNull()) {
+        saved = saveItem(parsed.as<JsonVariantConst>(), job.scope, job.batch, job.stored);
+      } else {
+        for (JsonVariantConst item : items) {
+          if (item["id"].is<int>() && item["id"].as<int>() == static_cast<int>(id)) {
+            saved |= saveItem(item, job.scope, job.batch, job.stored);
+          }
+        }
+      }
+    }
+    if (saved) {
       ai_prefetch::saveCheckpoint(job.scope, job.checkpoint);
       LOG_INF("AI_PRE", "Deferred stream item saved: id=%u", static_cast<unsigned>(id));
     }
@@ -583,7 +596,8 @@ bool AiSentencePrefetchSession::launchBatch() {
   batch_.reserve(ai_prefetch::BATCH_SENTENCES);
   job->url = job->scope.url;
   if (!buildUrl(job->url, job->scope.model, job->gemini) ||
-      !buildRequest(job->batch, job->gemini, job->scope.model, job->body.get(), MAX_BATCH_BODY, job->bodyBytes) ||
+      !buildRequest(job->batch, job->gemini, job->scope.model,
+                    reinterpret_cast<char*>(job->body.get()), MAX_BATCH_BODY, job->bodyBytes) ||
       !job->response.data || !job->framer || !trustedtime::trustedNow()) {
     // Do not reapply the 94 KiB preflight AFTER allocating JSON and response
     // buffers. TLS gets its own contiguous-block check just below.
@@ -632,7 +646,8 @@ bool AiSentencePrefetchSession::launchBatch() {
     result = esp_http_client_set_header(job->client, "x-opencode-session", session);
   }
   if (result == ESP_OK) {
-    result = esp_http_client_set_post_field(job->client, job->body.get(), static_cast<int>(job->bodyBytes));
+    result = esp_http_client_set_post_field(job->client, reinterpret_cast<char*>(job->body.get()),
+                                            static_cast<int>(job->bodyBytes));
   }
   if (result != ESP_OK) {
     LOG_INF("AI_PRE", "Batch skipped: HTTPS setup error=%d", static_cast<int>(result));
