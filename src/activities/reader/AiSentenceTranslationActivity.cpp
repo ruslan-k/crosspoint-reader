@@ -10,8 +10,8 @@
 #include <TrustedTime.h>
 #include <WiFi.h>
 #include <esp_err.h>
-#include <esp_http_client.h>
 #include <esp_heap_caps.h>
+#include <esp_http_client.h>
 #include <esp_random.h>
 
 #include <algorithm>
@@ -21,12 +21,12 @@
 #include <utility>
 
 #include "AITranslationStore.h"
+#include "CrossPointSettings.h"
 #include "DictionaryDefinitionActivity.h"
 #include "MappedInputManager.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
-#include "CrossPointSettings.h"
 #include "util/AiApiEndpoint.h"
 #include "util/AiTranslationRoots.h"
 
@@ -60,7 +60,6 @@ int aiPopupFont(const GfxRenderer& renderer) {
 constexpr int AI_POPUP_TITLE_HEIGHT = 46;
 constexpr int AI_POPUP_FOOTER_HEIGHT = 32;
 constexpr int AI_POPUP_PADDING = 15;
-
 
 // Do not send model output or the full provider error body to serial. Only
 // machine-readable provider error identifiers are included in diagnostic logs.
@@ -223,8 +222,8 @@ void AiSentenceTranslationActivity::preparePopupLines() {
   const AiPopupRect rect = aiPopupRect(renderer);
   const int fontId = aiPopupFont(renderer);
   const int bodyWidth = std::max(40, rect.width - 2 * AI_POPUP_PADDING - 10);
-  const int bodyHeight = std::max(20, rect.height - AI_POPUP_TITLE_HEIGHT - AI_POPUP_FOOTER_HEIGHT -
-                                        2 * AI_POPUP_PADDING);
+  const int bodyHeight =
+      std::max(20, rect.height - AI_POPUP_TITLE_HEIGHT - AI_POPUP_FOOTER_HEIGHT - 2 * AI_POPUP_PADDING);
   popupVisibleLines_ = std::max(1, bodyHeight / std::max(1, renderer.getLineHeight(fontId) + 2));
 
   // Pre-wrap only once; redraw and scroll operate on the same lines without
@@ -233,8 +232,7 @@ void AiSentenceTranslationActivity::preparePopupLines() {
     size_t begin = 0;
     while (begin <= text.size() && popupLines_.size() < 240) {
       const size_t end = text.find('\n', begin);
-      const std::string segment =
-          text.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+      const std::string segment = text.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
       if (segment.empty()) {
         popupLines_.push_back({"", false});
       } else {
@@ -274,8 +272,8 @@ void AiSentenceTranslationActivity::drawPopup() const {
   const int fontId = aiPopupFont(renderer);
   const int lineHeight = std::max(1, renderer.getLineHeight(fontId) + 2);
   const int bodyTop = rect.y + AI_POPUP_TITLE_HEIGHT + AI_POPUP_PADDING;
-  const int bodyHeight = std::max(20, rect.height - AI_POPUP_TITLE_HEIGHT - AI_POPUP_FOOTER_HEIGHT -
-                                        2 * AI_POPUP_PADDING);
+  const int bodyHeight =
+      std::max(20, rect.height - AI_POPUP_TITLE_HEIGHT - AI_POPUP_FOOTER_HEIGHT - 2 * AI_POPUP_PADDING);
 
   // Inset white panel with a black border like the dictionary dialog.
   renderer.fillRoundedRect(rect.x, rect.y, rect.width, rect.height, 5, Color::White);
@@ -305,8 +303,8 @@ void AiSentenceTranslationActivity::drawPopup() const {
     const int offset = (bodyHeight - thumb) * popupScroll_ / extra;
     renderer.fillRect(rect.x + rect.width - 9, bodyTop + offset, 3, thumb);
   }
-  renderer.drawLine(rect.x + 12, rect.y + rect.height - AI_POPUP_FOOTER_HEIGHT,
-                    rect.x + rect.width - 12, rect.y + rect.height - AI_POPUP_FOOTER_HEIGHT);
+  renderer.drawLine(rect.x + 12, rect.y + rect.height - AI_POPUP_FOOTER_HEIGHT, rect.x + rect.width - 12,
+                    rect.y + rect.height - AI_POPUP_FOOTER_HEIGHT);
   char progress[32];
   snprintf(progress, sizeof(progress), "%d-%d / %u", popupLines_.empty() ? 0 : popupScroll_ + 1,
            std::min<int>(popupLines_.size(), popupScroll_ + popupVisibleLines_),
@@ -314,8 +312,6 @@ void AiSentenceTranslationActivity::drawPopup() const {
   renderer.drawText(UI_10_FONT_ID, rect.x + AI_POPUP_PADDING, rect.y + rect.height - 25, progress);
   renderer.drawText(UI_10_FONT_ID, rect.x + rect.width - 130, rect.y + rect.height - 25, "Swipe to scroll");
 }
-
-
 
 void AiSentenceTranslationActivity::fail(std::string reason) {
   error_ = std::move(reason);
@@ -632,8 +628,7 @@ void AiSentenceTranslationActivity::loop() {
       if (x < rect.x || x >= rect.x + rect.width || y < rect.y || y >= rect.y + rect.height ||
           (y < rect.y + AI_POPUP_TITLE_HEIGHT && x >= rect.x + rect.width - 70)) {
         finish();
-      } else if (y >= rect.y + AI_POPUP_TITLE_HEIGHT &&
-                 y < rect.y + rect.height - AI_POPUP_FOOTER_HEIGHT) {
+      } else if (y >= rect.y + AI_POPUP_TITLE_HEIGHT && y < rect.y + rect.height - AI_POPUP_FOOTER_HEIGHT) {
         // Taps on the upper/lower half scroll a few lines; swipes scroll a page.
         const int middle = rect.y + rect.height / 2;
         scrollPopup(y < middle ? -4 : 4);
@@ -686,9 +681,8 @@ void AiSentenceTranslationActivity::render(RenderLock&&) {
   const AiPopupRect rect = aiPopupRect(renderer);
   renderer.fillRoundedRect(rect.x, rect.y, rect.width, rect.height, 5, Color::White);
   renderer.drawRoundedRect(rect.x, rect.y, rect.width, rect.height, 2, 5, true);
-  UITheme::drawCenteredWrappedText(renderer,
-                                  Rect{rect.x + 16, rect.y + 24, rect.width - 32, rect.height - 48},
-                                  NOTOSANS_14_FONT_ID, error_.c_str(), 9);
+  UITheme::drawCenteredWrappedText(renderer, Rect{rect.x + 16, rect.y + 24, rect.width - 32, rect.height - 48},
+                                   NOTOSANS_14_FONT_ID, error_.c_str(), 9);
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   renderer.displayBuffer();
