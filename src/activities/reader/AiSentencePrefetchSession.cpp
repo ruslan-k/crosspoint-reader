@@ -232,7 +232,13 @@ size_t processResponse(const std::string& raw, const ai_prefetch::Scope& scope,
     }
     // A partially translated batch cannot claim to be a complete word cache.
     // Missing mappings will be resolved by normal foreground Translate later.
-    if (count != record.words.size() || !memoryReady() || cancel.load(std::memory_order_relaxed)) continue;
+    // The stricter 94 KiB guard is for starting TLS. After TLS cleanup,
+    // JSON parsing may legitimately consume some heap. Persist using the
+    // smaller, independent cache-write reserve instead of discarding results.
+    const auto cacheMemory = HalMemory::getInternalHeap();
+    if (count != record.words.size() || cacheMemory.freeBytes < 48 * 1024 ||
+        cacheMemory.largestBlockBytes < 20 * 1024 || cancel.load(std::memory_order_relaxed))
+      continue;
     if (ai_prefetch::save(scope, record)) ++saved;
   }
   return saved;
