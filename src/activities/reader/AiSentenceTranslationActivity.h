@@ -12,7 +12,7 @@
 class AiSentenceTranslationActivity final : public Activity {
  public:
   AiSentenceTranslationActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string word,
-                                std::string sentence);
+                                std::string sentence, std::string bookPath);
   ~AiSentenceTranslationActivity() override;
   void onEnter() override;
   void onExit() override;
@@ -39,6 +39,7 @@ class AiSentenceTranslationActivity final : public Activity {
   State state_ = State::Connecting;
   std::string word_;
   std::string sentence_;
+  std::string bookPath_;
   std::string error_;
   bool requestPending_ = false;
   bool wifiOwned_ = false;
