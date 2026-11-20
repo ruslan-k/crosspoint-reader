@@ -100,11 +100,25 @@ bool buildUrl(std::string& url, const std::string& model, bool& gemini, bool str
   return true;
 }
 
+// Put JSON parsing allocations in Picco PSRAM: TLS can leave less than 26 KiB
+// internal RAM, causing otherwise complete SSE items to be discarded.
+class PsramJsonAllocator final : public ArduinoJson::Allocator {
+ public:
+  void* allocate(size_t bytes) override { return heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); }
+  void deallocate(void* ptr) override { heap_caps_free(ptr); }
+  void* reallocate(void* ptr, size_t bytes) override {
+    return heap_caps_realloc(ptr, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  }
+};
+PsramJsonAllocator gPsramJsonAllocator;
+
 struct Response {
   char* data = nullptr;
   size_t size = 0;
   bool overflow = false;
   std::atomic<bool>* cancel = nullptr;
+  void (*onDataReady)(void*) = nullptr;
+  void* onDataContext = nullptr;
 
   explicit Response(std::atomic<bool>* cancelToken) : cancel(cancelToken) {
     data = static_cast<char*>(heap_caps_malloc(MAX_RESPONSE + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -128,14 +142,18 @@ esp_err_t onHttpEvent(esp_http_client_event_t* event) {
   memcpy(result->data + result->size, event->data, bytes);
   result->size += bytes;
   result->data[result->size] = '\0';
+  // Decode the current SSE block before the next HTTP body callback. The
+  // bounded 48-KiB PSRAM buffer is reused, so streamed completions can exceed
+  // 48 KiB in total without overflowing. Never call this for ordinary JSON.
+  if (result->onDataReady) result->onDataReady(result->onDataContext);
   return ESP_OK;
 }
 
 // Keep untrusted model output bounded, and never log book text, model output,
 // credentials, or provider error payloads.
 std::string getOutput(const Response& response, bool gemini) {
-  JsonDocument answer;
-  JsonDocument filter;
+  JsonDocument answer(&gPsramJsonAllocator);
+  JsonDocument filter(&gPsramJsonAllocator);
   filter["choices"][0]["message"]["content"] = true;
   filter["choices"][0]["text"] = true;
   filter["output_text"] = true;
@@ -298,7 +316,7 @@ struct AiSentencePrefetchSession::Job {
 void AiSentencePrefetchSession::acceptStreamObject(std::string_view json) {
   if (!worker_) return;
   Job& job = *worker_;
-  JsonDocument parsed;
+  JsonDocument parsed(&gPsramJsonAllocator);
   if (deserializeJson(parsed, json.data(), json.size()) != DeserializationError::Ok) return;
   const auto accept = [&](JsonVariantConst item) {
     if (!item["id"].is<int>()) return;
@@ -347,7 +365,7 @@ void AiSentencePrefetchSession::consumeStream() {
   const bool ok = job.framer->feedSse(buffer.data, buffer.size, [&](std::string_view frame) {
     if (job.parseError) return;
     ++job.sseFrames;
-    JsonDocument chunk;
+    JsonDocument chunk(&gPsramJsonAllocator);
     if (deserializeJson(chunk, frame.data(), frame.size()) != DeserializationError::Ok) return;
     const auto feedText = [&](const char* text) {
       if (!text || job.parseError) return;
@@ -375,7 +393,7 @@ void AiSentencePrefetchSession::flushDeferred() {
   for (size_t id = 0; id < job.batch.size(); ++id) {
     if (!job.deferred[id]) continue;
     // Retry completed JSON records only; never replay an incomplete fragment.
-    JsonDocument parsed;
+    JsonDocument parsed(&gPsramJsonAllocator);
     const bool valid = deserializeJson(parsed, job.deferred[id], job.deferredBytes[id]) == DeserializationError::Ok;
     bool saved = false;
     if (valid) {
@@ -697,6 +715,12 @@ bool AiSentencePrefetchSession::launchBatch() {
           static_cast<unsigned>(HalMemory::getInternalHeap().freeBytes),
           static_cast<unsigned>(HalMemory::getInternalHeap().largestBlockBytes));
   worker_ = std::move(job);
+  if (worker_->streaming) {
+    worker_->response.onDataContext = this;
+    worker_->response.onDataReady = [](void* instance) {
+      static_cast<AiSentencePrefetchSession*>(instance)->consumeStream();
+    };
+  }
   return true;
 }
 
