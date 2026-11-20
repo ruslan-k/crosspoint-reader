@@ -336,7 +336,10 @@ void AiSentencePrefetchSession::acceptStreamObject(Job& job, std::string_view js
     return;
   }
   const auto accept = [&](JsonVariantConst item) {
-    if (!item["id"].is<int>()) { ++job.discardedObjects; return; }
+    if (!item["id"].is<int>()) {
+      ++job.discardedObjects;
+      return;
+    }
     const int id = item["id"].as<int>();
     if (id < 0 || id >= static_cast<int>(job.batch.size()) || job.accepted[id] >= 4) return;
     ++job.recognizedItems;
@@ -387,7 +390,8 @@ void AiSentencePrefetchSession::consumeStream(Job& job) {
     const auto feedText = [&](const char* text) {
       if (!text || job.parseError) return;
       ++job.textParts;
-      if (!job.framer->feedModel(text, strlen(text), [&](std::string_view record) { acceptStreamObject(job, record); })) {
+      if (!job.framer->feedModel(text, strlen(text),
+                                 [&](std::string_view record) { acceptStreamObject(job, record); })) {
         job.parseError = true;
       }
     };
@@ -739,9 +743,7 @@ bool AiSentencePrefetchSession::launchBatch() {
   std::shared_ptr<Job> shared = std::move(job);
   if (shared->streaming) {
     shared->response.onDataContext = shared.get();
-    shared->response.onDataReady = [](void* instance) {
-      consumeStream(*static_cast<Job*>(instance));
-    };
+    shared->response.onDataReady = [](void* instance) { consumeStream(*static_cast<Job*>(instance)); };
   }
   auto* argument = new (std::nothrow) std::shared_ptr<Job>(shared);
   if (!argument ||
