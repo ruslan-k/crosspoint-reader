@@ -41,6 +41,15 @@ An already-complete `/chat/completions` URL is also accepted.
 - Only the word and surrounding sentence are submitted on demand.
 - API keys are not compiled into firmware and never appear in the GET API
   response. POST `/api/ai-translation` supports setting and clearing the key.
+- Successful word+sentence translations are saved in the local exact-match cache
+  `/.crosspoint/ai-cache/<book-provider-model-hash>/<word-sentence-hash>.bin`.
+  The 64-bit FNV-1a filename hash is for lookup, not encryption. The record
+  validates the source word/sentence, scope, lengths and checksum before reuse.
+  Matching entries open without starting Wi-Fi or calling the API.
+  Cache files contain **plaintext book passages and translations** on the SD card.
+  The web file manager and plugins cannot open this protected directory, but
+  physical access to the SD card still exposes the contents. API keys are not
+  written into the cache.
 - The key is MAC-XOR obfuscated on SD as in CrossPoint's existing OPDS
   credentials. **This is not cryptographic encryption.** The backing file
   `/.crosspoint/ai-translation.json` is protected from web file operations.
@@ -63,12 +72,14 @@ An already-complete `/chat/completions` URL is also accepted.
   connection/selection screen appears only after saved-network attempts fail,
   or immediately when the user presses Confirm. Back cancels the selection.
 - During the AI request, a compact `Translating...` popup is displayed. On success
-  a **dictionary-style overlay** opens over the retained EPUB page: 12pt text,
+  a **dictionary-style overlay** opens over the retained EPUB page: compact
+  10pt Ubuntu text with Cyrillic support (Noto Sans 12/14 fallback),
   word + translation, Original, Translation. Swipe up/down (or left/right),
-  tap the upper/lower body, or use page buttons to scroll. Back, the top-right
-  Close label, or a tap outside the popup dismisses it without changing the
-  reader position. On memory-constrained boards with no spare framebuffer
-  storage, the overlay falls back to a white background.
+  tap the upper/lower body, or use page buttons to scroll. The Close label,
+  progress numbers, and Swipe to scroll footer are removed. Tap **outside**
+  the popup or press Back to dismiss it without changing the reader position.
+  On memory-constrained boards without spare framebuffer storage, the overlay
+  falls back to a white background.
 - Wi-Fi is switched off when leaving the translation if it was started by
   this activity. Pre-existing Wi-Fi sessions are left running.
 - If the serial console shows wolfSSL error `-188` (`ASN_NO_SIGNER_E`),
@@ -104,9 +115,27 @@ boundaries already in the selection window. It does **not** recover the part
 of a sentence on a preceding page, and does not handle every language's
 sentence-boundary conventions. Verify boundary cases on the device.
 
-The result uses the existing plain-text DictionaryDefinitionActivity, so its
-word wrapping and page navigation are shared with dictionary display. Cyrillic
-output requires an available font containing Cyrillic glyphs.
+The popup is now drawn directly by `AiSentenceTranslationActivity`; it does
+not use `DictionaryDefinitionActivity`. Its word wrapping and scrolling are
+bounded, and the chosen Ubuntu 10pt font includes Cyrillic glyphs.
+
+### Lookahead and background prefetch status
+
+**Not implemented yet:** preloading the next 100 sentences in the background.
+The current cache accelerates exact repeat word+sentence lookups only.
+The selection window holds at most 320 word boxes, so it cannot provide
+100 complete future sentences or span an unseen chapter. In addition,
+preloading sentence translations without contextual word translations
+would not make an arbitrary selected word immediately available.
+
+A safe follow-up should scan already-built EPUB pages incrementally from
+spine and visible-text offset, request 2-4 sentences per bounded HTTPS batch
+only while idle with adequate heap headroom, and persist contextual word
+mappings together with each sentence. Deduplication must check individual
+cache records; a numeric high-water mark alone cannot skip gaps. Keep
+networking and SD writes off the page-turn path, allow cancellation when
+Translate closes, and respect provider costs and rate limits. These extra
+operations need a Picco hardware performance check before enabling them.
 
 ## ESP-IDF HTTPS transport A/B
 
