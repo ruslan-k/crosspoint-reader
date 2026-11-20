@@ -37,6 +37,7 @@
 #include <cstring>
 #include <string_view>
 
+#include "AITranslationStore.h"
 #include "ClippingStore.h"
 #include "CrossPointSettings.h"
 #include "FontInstaller.h"
@@ -340,6 +341,8 @@ class CrossPointWebServer::RouteHandler final : public RequestHandler {
         {"/api/opds", HTTP_GET, [](S& s) { s.handleGetOpdsServers(); }, nullptr},
         {"/api/opds", HTTP_POST, [](S& s) { s.handlePostOpdsServer(); }, nullptr},
         {"/api/opds/delete", HTTP_POST, [](S& s) { s.handleDeleteOpdsServer(); }, nullptr},
+        {"/api/ai-translation", HTTP_GET, [](S& s) { s.handleGetAiTranslation(); }, nullptr},
+        {"/api/ai-translation", HTTP_POST, [](S& s) { s.handlePostAiTranslation(); }, nullptr},
 
         // Browser-side plugins (JS on the SD card) + their generic capabilities.
         {"/api/plugins", HTTP_GET, [](S& s) { s.handlePluginList(); }, nullptr},
@@ -1752,6 +1755,59 @@ void CrossPointWebServer::handlePostSettings() {
 
   LOG_DBG("WEB", "Applied %d setting(s)", applied);
   server->send(200, "text/plain", String("Applied ") + String(applied) + " setting(s)");
+}
+
+// ---- AI translation configuration API ----
+
+void CrossPointWebServer::handleGetAiTranslation() const {
+  AI_TRANSLATION_STORE.loadFromFile();
+  JsonDocument doc;
+  doc["url"] = AI_TRANSLATION_STORE.getUrl();
+  doc["model"] = AI_TRANSLATION_STORE.getModel();
+  doc["hasKey"] = AI_TRANSLATION_STORE.hasKey();
+  String response;
+  serializeJson(doc, response);
+  server->sendHeader("Cache-Control", "no-store");
+  server->send(200, "application/json", response);
+}
+
+void CrossPointWebServer::handlePostAiTranslation() {
+  if (!server->hasArg("plain") || server->arg("plain").length() > 2048) {
+    server->send(400, "text/plain", "Missing or oversized JSON body");
+    return;
+  }
+  JsonDocument doc;
+  if (deserializeJson(doc, server->arg("plain")) != DeserializationError::Ok ||
+      !doc["url"].is<const char*>() || !doc["model"].is<const char*>()) {
+    server->send(400, "text/plain", "Invalid AI translation settings");
+    return;
+  }
+  const std::string url = doc["url"].as<const char*>();
+  const std::string model = doc["model"].as<const char*>();
+  const bool urlOk = url.empty() || (url.size() >= 12 && url.size() <= 255 &&
+      url.compare(0, 8, "https://") == 0 && url.find('/', 8) != 8 &&
+      url.find_first_of("?#@\r\n\t ") == std::string::npos);
+  const bool modelOk = model.size() <= 96 && std::all_of(model.begin(), model.end(), [](unsigned char c) {
+    return std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '/';
+  });
+  if (!urlOk || !modelOk) {
+    server->send(400, "text/plain", "Use HTTPS URL and valid model name");
+    return;
+  }
+  const bool clearKey = doc["clearKey"] | false;
+  const bool replaceKey = clearKey || doc["apiKey"].is<const char*>();
+  std::string key = clearKey ? std::string() : std::string(doc["apiKey"] | "");
+  if (key.size() > 512 || key.find_first_of("\r\n") != std::string::npos) {
+    server->send(400, "text/plain", "Invalid API key");
+    return;
+  }
+  AI_TRANSLATION_STORE.loadFromFile();  // Keep the existing key if omitted.
+  if (!AI_TRANSLATION_STORE.configure(url, model, key, replaceKey)) {
+    server->send(500, "text/plain", "Could not save AI settings on SD card");
+    return;
+  }
+  server->sendHeader("Cache-Control", "no-store");
+  server->send(200, "text/plain", "OK");
 }
 
 // ---- OPDS Server API ----

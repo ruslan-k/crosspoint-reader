@@ -69,7 +69,7 @@ class ClipSelectionActivity final : public Activity {
   const Page& pageAt(size_t index) const { return *(borrowedPages.empty() ? pages[index] : borrowedPages[index]); }
   bool isLookup() const { return mode != Mode::Clip; }
   int firstAction() const { return lookupAvailable ? 0 : 1; }
-  int actionCount() const { return mode == Mode::DefinitionLookup ? 1 : 3 - firstAction(); }
+  int actionCount() const { return mode == Mode::DefinitionLookup ? 1 : 4 - firstAction(); }
   int actionAt(int x, int y) const;
   int closestInRow(uint16_t row, int centerX) const;
   int wordAt(int x, int y) const;
@@ -91,6 +91,7 @@ class ClipSelectionActivity final : public Activity {
   int textXOffset() const;
   void cancel();
   bool buildSelectedText(int first, int last, std::string& text) const;
+  bool buildSentenceText(int anchor, std::string& text) const;
   void drawSelection() const;
   bool renderIncremental();
   void ditherGapBetween(const WordBox& a, const WordBox& b, int offsetX, int offset) const;

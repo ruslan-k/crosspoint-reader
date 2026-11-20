@@ -107,6 +107,10 @@ add_subdirectory(plugin_manifest_classification)
 add_subdirectory(plugin_picker_layout)
 add_subdirectory(protected_paths)
 
+# The EPUB sentence boundary helper is hardware-independent C++20.
+add_executable(ai_sentence_utils ai_sentence/AiSentenceUtilsTest.cpp)
+add_test(NAME ai_sentence_utils COMMAND ai_sentence_utils)
+
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(NAME translation_spacing COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_translation_spacing.py)
 add_test(NAME TrustedTimeTimezone COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_trusted_time.py)

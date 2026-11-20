@@ -52,6 +52,7 @@
 
   <div id="wifi-container"></div>
   <div id="opds-container"></div>
+  <div id="ai-translation-container"></div>
 
   </main>
 <!--#include file="shared/Footer.html.inc" -->
@@ -649,6 +650,62 @@
     }
   }
 
+  // --- Personal AI translation (no Linga account or service required) ---
+  let aiTranslation = {url: '', model: '', hasKey: false};
+
+  function renderAiTranslation() {
+    const config = aiTranslation;
+    document.getElementById('ai-translation-container').innerHTML =
+      '<div class="card"><h2>AI Translation</h2>' +
+      '<p style="color:var(--label-color);">Translate the selected word and its full EPUB sentence to Russian. Configure your own Gemini, Groq or OpenCode Go key. Only text you request to translate is sent to the provider.</p>' +
+      '<div class="item-box" oninput="enableItemSave(this)">' +
+        '<div class="setting-row"><span class="setting-name">API URL (HTTPS)</span>' +
+          '<span class="setting-control"><input type="url" id="ai-url" spellcheck="false" value="' + escapeHtml(config.url || '') + '" placeholder="https://api.groq.com/openai/v1"></span></div>' +
+        '<div class="setting-row"><span class="setting-name">API Key</span>' +
+          '<span class="setting-control"><input type="password" id="ai-key" autocomplete="new-password" spellcheck="false" placeholder="' + (config.hasKey ? '(unchanged)' : 'Your API key') + '"></span></div>' +
+        '<div class="setting-row"><span class="setting-name">AI Model</span>' +
+          '<span class="setting-control"><input type="text" id="ai-model" spellcheck="false" value="' + escapeHtml(config.model || '') + '" placeholder="deepseek-v4.1-flash"></span></div>' +
+        '<label style="display:flex;align-items:center;gap:8px;margin-top:8px;"><input type="checkbox" id="ai-clear-key"> Remove saved API key</label>' +
+        '<div class="item-actions"><button class="btn-small btn-save-server" onclick="saveAiTranslation()" disabled>Save</button></div>' +
+      '</div>' +
+      '<p style="color:var(--label-color);font-size:0.9em;">Examples: Gemini URL https://generativelanguage.googleapis.com/v1beta and model gemini-2.5-flash; Groq URL https://api.groq.com/openai/v1 and model openai/gpt-oss-20b; OpenCode Go URL https://opencode.ai/zen/go/v1 and model deepseek-v4.1-flash. The API key is not returned by this page. The web UI uses local HTTP on your local network; use trusted Wi-Fi only.</p>' +
+      '</div>';
+  }
+
+  async function loadAiTranslation() {
+    try {
+      const response = await fetch('/api/ai-translation', {cache: 'no-store'});
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      aiTranslation = await response.json();
+      renderAiTranslation();
+    } catch (e) {
+      document.getElementById('ai-translation-container').innerHTML =
+        '<div class="card"><h2>AI Translation</h2><p>Could not load AI settings.</p></div>';
+    }
+  }
+
+  async function saveAiTranslation() {
+    const box = document.getElementById('ai-translation-container');
+    const btn = box.querySelector('.btn-save-server');
+    btn.disabled = true;
+    const data = {url: document.getElementById('ai-url').value.trim(),
+                  model: document.getElementById('ai-model').value.trim()};
+    const key = document.getElementById('ai-key').value.trim();
+    if (document.getElementById('ai-clear-key').checked) data.clearKey = true;
+    else if (key) data.apiKey = key;
+    try {
+      const response = await fetch('/api/ai-translation', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)
+      });
+      if (!response.ok) throw new Error(await response.text());
+      showWebToast('AI translation settings saved', false);
+      await loadAiTranslation();
+    } catch (e) {
+      showWebToast('Error: ' + e.message, true);
+      btn.disabled = false;
+    }
+  }
+
   // Sequential, not concurrent: the device's web server handles one client
   // connection at a time, and simultaneous fetches on page load can
   // stall long enough inside a single response to trip the firmware watchdog.
@@ -656,6 +713,7 @@
     await loadSettings();
     await loadWifiNetworks();
     await loadOpdsServers();
+    await loadAiTranslation();
   })();
 </script>
 </body>

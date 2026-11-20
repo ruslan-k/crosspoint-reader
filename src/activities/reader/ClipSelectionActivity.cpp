@@ -20,6 +20,7 @@
 #include "clippings/SelectionGeometry.h"
 #include "components/UIScale.h"
 #include "components/UITheme.h"
+#include "util/AiSentenceUtils.h"
 #include "util/DictionaryRegistry.h"
 #include "util/WordSelectionInput.h"
 
@@ -31,7 +32,8 @@ constexpr int TOUCH_DRAG_MOVEMENT_PX = 4;
 constexpr unsigned long TOUCH_PAGE_ADVANCE_HOLD_MS = 1000;
 constexpr int TOUCH_PAGE_END_DWELL_SLOP_PX = 8;
 constexpr ClippingResult::Action SELECTION_ACTIONS[] = {ClippingResult::Action::Lookup, ClippingResult::Action::Clip,
-                                                        ClippingResult::Action::Bookmark};
+                                                        ClippingResult::Action::Bookmark,
+                                                        ClippingResult::Action::Translate};
 
 const char* cleanWordStart(const char* text) {
   if (!text) return "";
@@ -402,6 +404,19 @@ bool ClipSelectionActivity::buildSelectedText(const int first, const int last, s
   return true;
 }
 
+bool ClipSelectionActivity::buildSentenceText(const int anchor, std::string& text) const {
+  if (anchor < 0 || anchor >= static_cast<int>(wordCount)) return false;
+  // Expand around the selected word, not the full highlighted range. The
+  // selection already owns this and following pages, so boundaries can cross
+  // line breaks and forward page turns without an extra EPUB parse.
+  int first = anchor;
+  while (first > 0 && !words[first].paragraphStart && !ai_sentence::isEnd(words[first - 1].text)) --first;
+  int last = anchor;
+  while (last + 1 < static_cast<int>(wordCount) && !ai_sentence::isEnd(words[last].text) &&
+         !words[last + 1].paragraphStart) ++last;
+  return buildSelectedText(first, last, text);
+}
+
 void ClipSelectionActivity::confirmSelection(const ClippingResult::Action action) {
   if (rangeStart < 0) {
     rangeStart = selected;
@@ -417,7 +432,8 @@ void ClipSelectionActivity::confirmSelection(const ClippingResult::Action action
   // reserve() aborts on OOM; leave room for the sort order and error popup too.
   const size_t requiredHeap = CLIPPING_TEXT_MAX + 1 + (last - first + 1) * sizeof(uint16_t) + 1024;
   const bool lowMemory = heap.largestBlockBytes < CLIPPING_TEXT_MAX + 1 || heap.freeBytes < requiredHeap;
-  if (lowMemory || !buildSelectedText(first, last, result.text)) {
+  if (lowMemory || !buildSelectedText(first, last, result.text) ||
+      (action == ClippingResult::Action::Translate && !buildSentenceText(first, result.sentence))) {
     static constexpr StrId OPTIONS[] = {StrId::STR_BACK};
     actionPopup.show(lowMemory ? StrId::STR_MEMORY_ERROR : StrId::STR_CLIPPING_TOO_LONG, OPTIONS, 1, 0, [](int) {});
     requestUpdate();
@@ -697,7 +713,7 @@ Rect ClipSelectionActivity::actionRect() const {
   const int font = uiScaleSpec().smallFontId;
   const int labelWidth =
       std::max({renderer.getTextWidth(font, tr(STR_LOOKUP)), renderer.getTextWidth(font, tr(STR_CLIP)),
-                renderer.getTextWidth(font, tr(STR_BOOKMARK_OPTION))});
+                renderer.getTextWidth(font, tr(STR_BOOKMARK_OPTION)), renderer.getTextWidth(font, tr(STR_AI_TRANSLATE))});
   const int padding = metrics.menuSpacing;
   const int count = actionCount();
   const int width = std::min(safe.width, count * (labelWidth + padding * 2) + padding * (count + 1));

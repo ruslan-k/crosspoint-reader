@@ -41,9 +41,10 @@ struct PageResult {
 };
 
 struct ClippingResult {
-  enum class Action : uint8_t { Clip, Lookup, Bookmark };
+  enum class Action : uint8_t { Clip, Lookup, Bookmark, Translate };
   Action action = Action::Clip;
   std::string text;
+  std::string sentence;  // Only filled by Translate, never persisted as a clipping.
   uint16_t startPageOffset = 0;
   uint16_t endPageOffset = 0;
   uint16_t startWordIndex = 0;

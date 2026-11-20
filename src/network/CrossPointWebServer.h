@@ -149,6 +149,10 @@ class CrossPointWebServer {
   void handlePostOpdsServer();
   void handleDeleteOpdsServer();
 
+  // Personal AI translation provider (GET never exposes the API key).
+  void handleGetAiTranslation() const;
+  void handlePostAiTranslation();
+
   // Wi-Fi credential handlers
   void handleGetWifiNetworks() const;
   void handlePostWifiNetwork();
