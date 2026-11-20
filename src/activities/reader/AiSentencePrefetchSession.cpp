@@ -505,7 +505,14 @@ void AiSentencePrefetchSession::tick() {
     return;
   }
   if (WiFi.status() != WL_CONNECTED) return;
-  if (!memoryReady()) {
+  // Finish a small, already-loaded token buffer even if it temporarily
+  // occupies enough internal RAM to fail the stricter TLS preflight.
+  // The batch launcher frees that buffer BEFORE checking TLS headroom.
+  if (batch_.size() >= ai_prefetch::BATCH_SENTENCES) {
+    launchBatch();
+    return;
+  }
+  if (tokenIndex_ >= pageTokens_.size() && !memoryReady()) {
     if (!reportedMemoryPause_) {
       const auto mem = HalMemory::getInternalHeap();
       LOG_INF("AI_PRE", "Waiting for RAM: free=%u largest=%u need=%u/%u",
@@ -516,8 +523,9 @@ void AiSentencePrefetchSession::tick() {
     return;
   }
   reportedMemoryPause_ = false;
-  if (batch_.size() >= ai_prefetch::BATCH_SENTENCES) {
-    launchBatch();  // Retry a prepared batch before reading another page.
+  if (tokenIndex_ < pageTokens_.size() && HalMemory::getInternalHeap().freeBytes < 32 * 1024) {
+    LOG_INF("AI_PRE", "Token scan paused: internal RAM low");
+    disabled_ = true;
     return;
   }
   if (scanEnded_ || considered_ >= ai_prefetch::WINDOW_SENTENCES) {
@@ -542,6 +550,7 @@ void AiSentencePrefetchSession::tick() {
   }
   if (tokenIndex_ >= pageTokens_.size()) {
     pageTokens_.clear();
+    std::vector<Token>().swap(pageTokens_);  // Release token RAM between pages.
     tokenIndex_ = 0;
   }
   if (batch_.size() == ai_prefetch::BATCH_SENTENCES) launchBatch();
