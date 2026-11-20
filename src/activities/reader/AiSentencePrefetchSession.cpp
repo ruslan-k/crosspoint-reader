@@ -30,6 +30,7 @@
 #include "util/AiApiEndpoint.h"
 #include "util/AiSentenceUtils.h"
 #include "util/AiPrefetchStream.h"
+#include "util/AiBoundedJsonWriter.h"
 #include "util/AiTranslationRoots.h"
 
 namespace {
@@ -155,51 +156,52 @@ std::string getOutput(const Response& response, bool gemini) {
 }
 
 bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, const std::string& model,
-                  std::string& body) {
-  // Send only missing word indices (the durable cache supplies the rest).
-  JsonDocument payload;
-  JsonArray sentences = payload["sentences"].to<JsonArray>();
+                  char* body, size_t capacity, size_t& bodyBytes) {
+  // All large serialization buffers are in PSRAM. No intermediate ArduinoJson
+  // documents, copied prompt strings or payload strings occupy internal heap.
+  auto promptBuffer = HalMemory::allocatePsram(17 * 1024);
+  if (!promptBuffer || !body) return false;
+  ai_prefetch::BoundedJsonWriter prompt(promptBuffer.get(), 17 * 1024);
+  if (!prompt.append(
+          "Translate the numbered source text into Russian. Return one compact, standalone JSON object "
+          "per sentence (NDJSON), in increasing id order, as soon as each is ready. "
+          "Schema: {\"id\":0,\"translation\":\"...\",\"words\":[{\"i\":0,\"translation\":\"...\"}]}. "
+          "Omit the sentence translation if need_sentence=false. The words arrays contain "
+          "ONLY missing contextual word translations; return all you can without placeholders, "
+          "unnecessary explanations, markdown fences or an enclosing items array. "
+          "Each word translation should be brief. Source:\n{\"sentences\":["))
+    return false;
   for (size_t i = 0; i < batch.size(); ++i) {
-    JsonObject sentence = sentences.add<JsonObject>();
-    sentence["id"] = static_cast<unsigned>(i);
-    sentence["text"] = batch[i].source;
-    sentence["need_sentence"] = batch[i].translation.empty();
-    JsonArray words = sentence["words"].to<JsonArray>();
+    if (i && !prompt.append(",")) return false;
+    if (!prompt.append("{\"id\":") || !prompt.integer(static_cast<unsigned>(i)) ||
+        !prompt.append(",\"text\":") || !prompt.quoted(batch[i].source) ||
+        !prompt.append(batch[i].translation.empty() ? ",\"need_sentence\":true,\"words\":["
+                                                     : ",\"need_sentence\":false,\"words\":["))
+      return false;
     for (size_t w = 0; w < batch[i].words.size(); ++w) {
-      JsonObject word = words.add<JsonObject>();
-      word["i"] = static_cast<unsigned>(w);
-      word["text"] = batch[i].words[w].source;
+      if (w && !prompt.append(",")) return false;
+      if (!prompt.append("{\"i\":") || !prompt.integer(static_cast<unsigned>(w)) ||
+          !prompt.append(",\"text\":") || !prompt.quoted(batch[i].words[w].source) ||
+          !prompt.append("}"))
+        return false;
     }
+    if (!prompt.append("]}")) return false;
   }
+  if (!prompt.append("]}")) return false;
 
-  std::string input;
-  serializeJson(payload, input);
-  if (payload.overflowed() || input.size() > 17000) return false;
-  const std::string prompt =
-      "Translate the numbered text into Russian. Respond with exactly one standalone, compact JSON object "
-      "per sentence, each on its own line (NDJSON). Emit id=0 first, then in increasing id order. "
-      "For each id include {\"id\":0,\"translation\":\"...\",\"words\":[{\"i\":0,\"translation\":\"...\"}]}. "
-      "If need_sentence=false omit translation (already cached). The numbered words list contains "
-      "ONLY missing contextual word translations; return as many valid word entries as possible, "
-      "never invent indices or fill missing words with placeholders. Each word translation is brief. "
-      "Do not wait for all sentences to write the first object. No markdown fences, explanations, "
-      "or a surrounding items array. Source:\n" +
-      input;
-  JsonDocument request;
+  ai_prefetch::BoundedJsonWriter request(body, capacity);
   if (gemini) {
-    JsonObject item = request["contents"].to<JsonArray>().add<JsonObject>();
-    item["parts"].to<JsonArray>().add<JsonObject>()["text"] = prompt;
-    request["generationConfig"].to<JsonObject>()["maxOutputTokens"] = 6144;
+    if (!request.append("{\"contents\":[{\"parts\":[{\"text\":") || !request.quoted(prompt.view()) ||
+        !request.append("}]}],\"generationConfig\":{\"maxOutputTokens\":6144}}"))
+      return false;
   } else {
-    request["model"] = model;
-    request["max_tokens"] = 6144;
-    request["stream"] = true;
-    JsonObject message = request["messages"].to<JsonArray>().add<JsonObject>();
-    message["role"] = "user";
-    message["content"] = prompt;
+    if (!request.append("{\"model\":") || !request.quoted(model) ||
+        !request.append(",\"max_tokens\":6144,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":") ||
+        !request.quoted(prompt.view()) || !request.append("}]}"))
+      return false;
   }
-  serializeJson(request, body);
-  return !request.overflowed() && body.size() <= MAX_BATCH_BODY;
+  bodyBytes = request.size();
+  return bodyBytes > 0;
 }
 
 // A model can return only a sentence, only a subset of requested words, or
@@ -246,7 +248,8 @@ struct AiSentencePrefetchSession::Job {
   ai_prefetch::Checkpoint checkpoint;
   std::vector<ai_prefetch::Sentence> batch;
   std::string url;
-  std::string body;
+  HalMemory::PsramBuffer body = HalMemory::allocatePsram(MAX_BATCH_BODY);
+  size_t bodyBytes = 0;
   std::string auth;
   bool gemini = false;
   std::atomic<bool> cancel{false};
@@ -580,8 +583,8 @@ bool AiSentencePrefetchSession::launchBatch() {
   batch_.reserve(ai_prefetch::BATCH_SENTENCES);
   job->url = job->scope.url;
   if (!buildUrl(job->url, job->scope.model, job->gemini) ||
-      !buildRequest(job->batch, job->gemini, job->scope.model, job->body) || !job->response.data || !job->framer ||
-      !trustedtime::trustedNow()) {
+      !buildRequest(job->batch, job->gemini, job->scope.model, job->body.get(), MAX_BATCH_BODY, job->bodyBytes) ||
+      !job->response.data || !job->framer || !trustedtime::trustedNow()) {
     // Do not reapply the 94 KiB preflight AFTER allocating JSON and response
     // buffers. TLS gets its own contiguous-block check just below.
     LOG_INF("AI_PRE", "Batch skipped: endpoint, clock, parser or bounded PSRAM buffers");
@@ -629,7 +632,7 @@ bool AiSentencePrefetchSession::launchBatch() {
     result = esp_http_client_set_header(job->client, "x-opencode-session", session);
   }
   if (result == ESP_OK) {
-    result = esp_http_client_set_post_field(job->client, job->body.data(), static_cast<int>(job->body.size()));
+    result = esp_http_client_set_post_field(job->client, job->body.get(), static_cast<int>(job->bodyBytes));
   }
   if (result != ESP_OK) {
     LOG_INF("AI_PRE", "Batch skipped: HTTPS setup error=%d", static_cast<int>(result));
