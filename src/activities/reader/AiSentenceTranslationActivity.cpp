@@ -40,8 +40,8 @@ std::string safeErrorId(const char* value) {
   std::string safe;
   while (*value && safe.size() < 64) {
     const unsigned char c = static_cast<unsigned char>(*value++);
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-        c == '_' || c == '-' || c == '.' || c == '/') {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' ||
+        c == '.' || c == '/') {
       safe += static_cast<char>(c);
     }
   }
@@ -318,8 +318,8 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
     if (!providerMessage && jsonError) providerMessage = providerError["message"].as<const char*>();
     if (!providerMessage && jsonError) providerMessage = providerError["error"].as<const char*>();
 
-    LOG_ERR("AI", "Provider request failed: model=%s status=%d type=%s code=%s", config.getModel().c_str(),
-            status, safeErrorId(providerType).c_str(), safeErrorId(providerCode).c_str());
+    LOG_ERR("AI", "Provider request failed: model=%s status=%d type=%s code=%s", config.getModel().c_str(), status,
+            safeErrorId(providerType).c_str(), safeErrorId(providerCode).c_str());
     LOG_ERR("AI", "Translation HTTP failed: status=%d response_bytes=%u", status,
             static_cast<unsigned>(response.data.size()));
     if (status > 0) {
