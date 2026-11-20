@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+"""Source contract for Picco's cooperative Translate-only prefetch loop.
+
+Hardware networking and power-loss behavior still require real Picco tests.
+"""
+from pathlib import Path
+
+root = Path(__file__).resolve().parents[1]
+prefetch = (root / "src/activities/reader/AiSentencePrefetchSession.cpp").read_text()
+header = (root / "src/activities/reader/AiSentencePrefetchSession.h").read_text()
+activity = (root / "src/activities/reader/AiSentenceTranslationActivity.cpp").read_text()
+cache = (root / "src/util/AiPrefetchCache.cpp").read_text()
+
+assert "MIN_INTERNAL_FREE = 94 * 1024" in prefetch
+assert "MIN_INTERNAL_BLOCK = 36 * 1024" in prefetch
+assert "MIN_INTERNAL_IN_FLIGHT = 15 * 1024" in prefetch
+assert "HTTP_STEP_TIMEOUT_MS = 100" in prefetch
+assert "HTTP_TIMEOUT_MS = 60000" in prefetch
+assert "cfg.is_async = true;" in prefetch
+assert "esp_http_client_perform(job.client)" in prefetch
+assert "pollBatch();" in prefetch
+assert "esp_http_client_cleanup(job.client)" in prefetch
+assert "auto page = section_->loadPage(nextPage_)" in prefetch
+assert "token.text = word;" in prefetch
+assert "reportedMemoryPause_" in header
+assert "std::unique_ptr<Job> worker_" in header
+assert "std::shared_ptr<Job> worker_" not in header
+for banned in ("xTaskCreate", "vTaskDelete", "gPrefetchHttpBusy", "page_ = section_->loadPage"):
+    assert banned not in prefetch, banned
+assert "ai_prefetch::WINDOW_SENTENCES" in prefetch
+assert "ai_prefetch::BATCH_SENTENCES" in prefetch
+assert "saveCheckpoint(job.scope, job.checkpoint)" in prefetch
+assert "ai_prefetch::has(scope_, current_)" in prefetch
+assert "if (prefetch_) prefetch_->tick();" in activity
+assert "prefetch_->cancel();" in activity
+assert "Foreground translation cache save: %s" in activity
+assert "Exact translation cache hit" in activity
+assert "Prefetched translation cache hit" in activity
+assert "Storage.exists(path.c_str())" in cache
+print("Picco cooperative prefetch source guards passed")

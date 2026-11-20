@@ -166,18 +166,21 @@ Implementation settings are fixed for Picco:
   The response includes translated sentences **and contextual word translations**
   keyed to the visible-codepoint position of each source word. Repeated words
   at different offsets are not confused.
-- **Lifetime:** while the Translate modal is **Showing**, with Wi-Fi already
-  connected and a trusted clock. Cached offline translations show instantly,
-  but **do not automatically enable Wi-Fi solely for prefetch**.
-  A network worker runs separately from the UI/EPUB renderer. Only one
-  background HTTPS request may run globally; a modal dismissal signals
-  cancellation and prevents further batches.
-- **Memory:** background prefetch is Picco-only. It pauses unless at least
-  120 KiB internal RAM, a 44 KiB contiguous internal block, 144 KiB PSRAM
-  and a 64 KiB contiguous PSRAM block are available. Responses have a hard
-  48 KiB PSRAM buffer; request JSON is capped at 24 KiB. The HTTPS request
-  is nonblocking and has an overall 30-second timeout, with cancellation
-  tested between nonblocking polls. No page-turn path performs prefetch work.
+- **Lifetime:** only while Translate is **Showing**, Wi-Fi is connected,
+  and the clock is trusted. Offline cache hits never require a radio.
+  A **cooperative asynchronous HTTPS state machine** uses Translate's existing
+  UI task, making at most one 100-ms transport step per tick. It does **not**
+  create another FreeRTOS stack or execute during page turns.
+  Closing the modal destroys the HTTPS client synchronously.
+- **Memory:** Picco-only. The original 120-KiB internal RAM requirement
+  prevented every batch in measured tests (~101-105 KiB available after a
+  foreground translation). The new cooperative path requires **94 KiB free
+  internal**, **36 KiB largest internal block**, 144 KiB PSRAM and 64 KiB
+  largest PSRAM block **before** starting TLS. Abort the current request if
+  internal free memory drops below 15 KiB; disabled after failure, no storm.
+  It copies only a bounded number of short tokens from each EPUB page and
+  destroys the Page object before HTTPS. Response is capped at 48 KiB in
+  PSRAM, outgoing JSON at 24 KiB; overall timeout 60 seconds.
 - **Crash recovery:** each validated sentence is written to an atomic,
   checksummed binary record. The progress checkpoint is a hint, **never**
   proof that all earlier sentences were translated. The scanner verifies
@@ -192,7 +195,23 @@ The current implementation does **not** prefetch beyond the current spine
 or unseen/unbuilt pages, and it has not yet been verified against real AI
 models, battery performance, or memory pressure on physical Picco hardware.
 100 is a lookahead limit, not a guarantee that 100 replies will be ready
-before the user closes the popup.
+before the user closes the popup. In particular, a single batch can take
+many seconds on reasoning models. **Closing Translate cancels the in-flight
+request**; there is deliberately no network request after the modal closes.
+Therefore immediately opening Translate for the next sentence may still go
+online unless the preceding batch was fully processed and saved. The next
+popup rechecks individual records and can fill gaps.
+
+After flashing the new build, validate with serial logs:
+- `[AI_CACHE] Foreground translation cache save: ok` means the selected
+  word+sentence pair was saved; selecting the exact pair again should produce
+  `[AI_CACHE] Exact translation cache hit` without Wi-Fi.
+- `[AI_PRE] Batch started: count=4` confirms lookahead started.
+  `[AI_PRE] Batch stored 4/4 sentences` confirms a full packet is durable.
+  A later selection should produce `[AI_CACHE] Prefetched translation cache hit`.
+- `[AI_PRE] Waiting for RAM` shows a real guard block and reports the
+  internal free/contiguous counts. A failed or partial batch is never
+  checkpointed as fully complete; only validated records are reused.
 
 ## ESP-IDF HTTPS transport A/B
 
