@@ -36,10 +36,16 @@ An already-complete `/chat/completions` URL is also accepted.
   `/.crosspoint/ai-translation.json` is protected from web file operations.
 - The web interface itself is served over local HTTP; only configure on
   trusted Wi-Fi, and do not expose the device's web server to the internet.
-- Outbound requests use wolfSSL TLS chain and hostname verification with a
-  built-in trust set (GTS R1/R2/R3/R4, ISRG Root X1, DigiCert Global Root G2;
-  plus the exact fingerprint-verified Google WE1 intermediate used by Cloudflare).
-  Unrecognised CA chains fail closed; no `setInsecure()` fallback.
+- Outbound **AI requests use ESP-IDF's `esp_http_client` with mbedTLS**, with
+  root/intermediate PEM verification **and hostname matching enabled**. This
+  replaces FreeInk wolfSSL only for BYOK translation after repeated hardware
+  `ASN_NO_SIGNER_E (-188)` failures against `opencode.ai`. Other firmware
+  networking keeps its existing wolfSSL implementation.
+- All HTTP redirects are disabled: the API key is never forwarded to a
+  different origin. Response buffering is capped at 8 KiB, and only the
+  API hostname, status and TLS error codes are logged, never the key or text.
+- The same trust set (GTS R1/R2/R3/R4, ISRG Root X1, DigiCert Global Root G2,
+  and verified WE1 intermediate) is used. Unknown chains fail closed.
 - Wi-Fi starts on demand. The translation activity first tries the last
   successfully connected saved network, then asynchronously scans for other
   saved networks. During automatic reconnect, a compact status popup overlays
@@ -71,6 +77,20 @@ sentence-boundary conventions. Verify boundary cases on the device.
 The result uses the existing plain-text DictionaryDefinitionActivity, so its
 word wrapping and page navigation are shared with dictionary display. Cyrillic
 output requires an available font containing Cyrillic glyphs.
+
+## ESP-IDF HTTPS transport A/B
+
+The device log `serial-log (7).txt` on firmware `25852e3` confirms a
+successful saved Wi-Fi connection and a successful wolfSSL trust-store load
+(`CA load result=1`), followed by the same `-188` on TLS 1.3 and TLS 1.2.
+Adding the authentic WE1 intermediate did **not** repair the chain validation.
+The next A/B therefore changes the **TLS implementation**, not the CA list.
+ESP-IDF's `esp_http_client` uses mbedTLS and validates the configured PEM
+chain and HTTPS hostname. If it fails, the serial log now records the IDF
+result, mbedTLS error code and verification flags, without credentials.
+
+A successful firmware build does not establish a successful HTTPS translation
+on the device. Test both the provider's response and Wi-Fi cleanup on Picco.
 
 ## Diagnostics on Picco
 

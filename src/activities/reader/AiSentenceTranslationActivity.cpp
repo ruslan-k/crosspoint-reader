@@ -7,7 +7,8 @@
 #include <I18n.h>
 #include <Logging.h>
 #include <Memory.h>
-#include <SecureHttpClient.h>
+#include <esp_err.h>
+#include <esp_http_client.h>
 #include <TrustedTime.h>
 #include <WiFi.h>
 
@@ -30,6 +31,27 @@ constexpr size_t MAX_RESPONSE_BYTES = 8 * 1024;
 constexpr size_t MAX_SENTENCE_BYTES = 2048;
 constexpr uint32_t MIN_FREE_FOR_TLS = 35000;
 constexpr uint32_t MIN_BLOCK_FOR_TLS = 20000;
+
+// Bounded response buffer: an unexpectedly large provider response must not
+// exhaust internal RAM while ESP-IDF/mbedTLS is holding the TLS session.
+struct AiHttpResponse {
+  std::string data;
+  bool overflow = false;
+};
+
+esp_err_t onAiHttpEvent(esp_http_client_event_t* event) {
+  if (!event || event->event_id != HTTP_EVENT_ON_DATA) return ESP_OK;
+  auto* response = static_cast<AiHttpResponse*>(event->user_data);
+  if (!response || event->data_len < 0) return ESP_FAIL;
+  const size_t bytes = static_cast<size_t>(event->data_len);
+  if (bytes > MAX_RESPONSE_BYTES - response->data.size()) {
+    response->overflow = true;
+    return ESP_FAIL;
+  }
+  response->data.append(static_cast<const char*>(event->data), bytes);
+  return ESP_OK;
+}
+
 
 std::string trim(std::string s) {
   const auto space = [](const unsigned char c) { return std::isspace(c); };
@@ -193,47 +215,76 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
           static_cast<unsigned>(heap.freeBytes), static_cast<unsigned>(heap.largestBlockBytes),
           static_cast<unsigned>(sizeof(ai_translation::ROOTS) - 1));
 
-  freeink::SecureHttpClient http;
-  http.setCACert(ai_translation::ROOTS);  // Verify peer chain AND hostname.
-  http.setTimeout(30000);
-  http.setUserAgent("CrossPoint-AI-Translation");
-  if (!http.begin(url) || !http.connect()) {
-    LOG_ERR("AI", "HTTPS connection failed for host=%s", host.c_str());
+  // Use the ESP-IDF HTTPS client (mbedTLS), not FreeInk's wolfSSL client:
+  // the latter consistently fails with ASN_NO_SIGNER_E (-188) on opencode.ai
+  // despite successfully loading both GTS Root R4 and its WE1 intermediate.
+  // cert_pem and default hostname verification are mandatory for BYOK keys.
+  AiHttpResponse response;
+  response.data.reserve(2048);
+  esp_http_client_config_t httpConfig = {};
+  httpConfig.url = url.c_str();
+  httpConfig.method = HTTP_METHOD_POST;
+  httpConfig.timeout_ms = 30000;
+  httpConfig.cert_pem = ai_translation::ROOTS;
+  httpConfig.skip_cert_common_name_check = false;
+  httpConfig.disable_auto_redirect = true;  // Never forward API keys across redirects.
+  httpConfig.event_handler = onAiHttpEvent;
+  httpConfig.user_data = &response;
+  httpConfig.buffer_size = 2048;
+  httpConfig.buffer_size_tx = 2048;
+
+  esp_http_client_handle_t client = esp_http_client_init(&httpConfig);
+  if (!client) {
+    LOG_ERR("AI", "esp_http_client_init failed for host=%s", host.c_str());
+    fail(tr(STR_AI_LOW_MEMORY));
+    return false;
+  }
+
+  esp_err_t setup = esp_http_client_set_header(client, "Content-Type", "application/json");
+  if (setup == ESP_OK) setup = esp_http_client_set_header(client, "User-Agent", "CrossPoint-AI-Translation");
+  std::string authHeader;
+  if (setup == ESP_OK && gemini) {
+    setup = esp_http_client_set_header(client, "x-goog-api-key", config.getKey().c_str());
+  } else if (setup == ESP_OK) {
+    authHeader = "Bearer " + config.getKey();
+    setup = esp_http_client_set_header(client, "Authorization", authHeader.c_str());
+  }
+  if (setup == ESP_OK) {
+    setup = esp_http_client_set_post_field(client, body.data(), static_cast<int>(body.size()));
+  }
+  if (setup != ESP_OK) {
+    LOG_ERR("AI", "ESP-IDF HTTPS setup failed: %s", esp_err_to_name(setup));
+    esp_http_client_cleanup(client);
     fail(tr(STR_AI_NETWORK_FAILED));
     return false;
   }
-  http.addHeader("Content-Type", "application/json");
-  if (gemini) {
-    http.addHeader("x-goog-api-key", config.getKey());
-  } else {
-    http.addHeader("Authorization", "Bearer " + config.getKey());
+
+  const esp_err_t result = esp_http_client_perform(client);
+  const int status = esp_http_client_get_status_code(client);
+  if (result != ESP_OK) {
+    int tlsError = 0;
+    int tlsFlags = 0;
+    esp_http_client_get_and_clear_last_tls_error(client, &tlsError, &tlsFlags);
+    LOG_ERR("AI", "mbedTLS HTTPS failed: host=%s result=%s tls=%d verify_flags=%d overflow=%d",
+            host.c_str(), esp_err_to_name(result), tlsError, tlsFlags, response.overflow);
   }
+  esp_http_client_cleanup(client);
 
-  std::string response;
-  response.reserve(2048);
-  bool overflow = false;
-  const int status = http.sendRequest("POST", reinterpret_cast<const uint8_t*>(body.data()), body.size(),
-                                      [&](const uint8_t* data, const size_t len) {
-                                        if (len > MAX_RESPONSE_BYTES - response.size()) {
-                                          overflow = true;
-                                          return false;
-                                        }
-                                        response.append(reinterpret_cast<const char*>(data), len);
-                                        return true;
-                                      });
-  const bool complete = http.responseComplete();
-  http.end();
-
-  if (status != 200 || overflow || !complete) {
-    char code[40];
-    snprintf(code, sizeof(code), "HTTP %d", status);
-    LOG_ERR("AI", "Translation request failed: status=%d overflow=%d", status, overflow);
-    fail(status > 0 ? code : tr(STR_AI_NETWORK_FAILED));
+  if (result != ESP_OK || response.overflow || status != 200) {
+    LOG_ERR("AI", "Translation HTTP failed: status=%d response_bytes=%u", status,
+            static_cast<unsigned>(response.data.size()));
+    if (status > 0) {
+      char statusText[32];
+      snprintf(statusText, sizeof(statusText), "HTTP %d", status);
+      fail(statusText);
+    } else {
+      fail(tr(STR_AI_NETWORK_FAILED));
+    }
     return false;
   }
 
   JsonDocument answer;
-  if (deserializeJson(answer, response) != DeserializationError::Ok) {
+  if (deserializeJson(answer, response.data) != DeserializationError::Ok) {
     fail(tr(STR_AI_BAD_RESPONSE));
     return false;
   }
