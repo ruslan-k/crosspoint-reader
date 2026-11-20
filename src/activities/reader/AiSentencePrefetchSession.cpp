@@ -270,7 +270,10 @@ void batchTask(void* argument) {
     esp_http_client_config_t cfg{};
     cfg.url = url.c_str();
     cfg.method = HTTP_METHOD_POST;
-    cfg.timeout_ms = HTTP_TIMEOUT_MS;
+    // Non-blocking HTTPS allows the modal to cancel without another task
+    // closing a live client handle (which is not thread-safe).
+    cfg.timeout_ms = 5000;
+    cfg.is_async = true;
     cfg.cert_pem = ai_translation::ROOTS;
     cfg.skip_cert_common_name_check = false;
     cfg.disable_auto_redirect = true;
@@ -299,7 +302,19 @@ void batchTask(void* argument) {
     }
     if (setup == ESP_OK) setup = esp_http_client_set_post_field(client, body.data(), static_cast<int>(body.size()));
     if (job->cancel.load()) setup = ESP_FAIL;
-    const esp_err_t result = setup == ESP_OK ? esp_http_client_perform(client) : setup;
+    esp_err_t result = setup;
+    if (setup == ESP_OK) {
+      const uint32_t started = millis();
+      do {
+        if (job->cancel.load(std::memory_order_relaxed) ||
+            static_cast<uint32_t>(millis() - started) >= HTTP_TIMEOUT_MS) {
+          result = ESP_FAIL;
+          break;
+        }
+        result = esp_http_client_perform(client);
+        if (result == ESP_ERR_HTTP_EAGAIN) vTaskDelay(pdMS_TO_TICKS(25));
+      } while (result == ESP_ERR_HTTP_EAGAIN);
+    }
     const int status = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
     if (result != ESP_OK || response.overflow || status != 200 || job->cancel.load()) {
