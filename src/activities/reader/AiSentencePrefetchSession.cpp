@@ -46,6 +46,10 @@ constexpr uint32_t PREFETCH_STACK = 12288;
 constexpr size_t TOKENS_PER_TICK = 48;
 constexpr size_t MAX_PAGE_TOKENS = 320;
 
+// A prior popup may close while its HTTPS task is finishing. Never allow a
+// second popup to start another request until that worker releases TLS.
+std::atomic<bool> gPrefetchHttpBusy{false};
+
 // Never compete with the reader for its last heap blocks. TLS needs internal
 // buffers even when JSON and the HTTP body are backed by Picco PSRAM.
 bool memoryReady() {
@@ -334,6 +338,7 @@ void batchTask(void* argument) {
   job->success = perform();
   job->done.store(true, std::memory_order_release);
   job.reset();
+  gPrefetchHttpBusy.store(false, std::memory_order_release);
   vTaskDelete(nullptr);
 }
 }  // namespace
@@ -362,8 +367,9 @@ void AiSentencePrefetchSession::cancel() {
 }
 
 bool AiSentencePrefetchSession::openPage() {
-  if (!section_ || section_->isBuilding() || nextPage_ >= static_cast<int>(section_->pageCount)) {
-    // A partial chapter may grow later, but never start a build just for AI.
+  if (!section_ || nextPage_ >= static_cast<int>(section_->pageCount)) {
+    // Reuse pages already laid out by the reader (including a partial build).
+    // Never call buildSomeMore() or inflate another chapter just for AI.
     scanEnded_ = true;
     return false;
   }
@@ -459,6 +465,8 @@ void AiSentencePrefetchSession::finishScan() {
 
 bool AiSentencePrefetchSession::launchBatch() {
   if (batch_.empty() || !memoryReady()) return false;
+  bool idle = false;
+  if (!gPrefetchHttpBusy.compare_exchange_strong(idle, true, std::memory_order_acq_rel)) return false;
   auto job = std::make_shared<Job>();
   job->scope = scope_;
   job->batch = std::move(batch_);
@@ -467,7 +475,10 @@ bool AiSentencePrefetchSession::launchBatch() {
   batch_.clear();
   batch_.reserve(ai_prefetch::BATCH_SENTENCES);
   auto* holder = new (std::nothrow) std::shared_ptr<Job>(job);
-  if (!holder) return false;
+  if (!holder) {
+    gPrefetchHttpBusy.store(false, std::memory_order_release);
+    return false;
+  }
   TaskHandle_t task = nullptr;
 #if defined(configNUM_CORES) && configNUM_CORES > 1
   constexpr BaseType_t core = 0;
@@ -480,6 +491,7 @@ bool AiSentencePrefetchSession::launchBatch() {
     delete holder;
     LOG_INF("AI_PRE", "Skipping batch: low memory for task stack");
     disabled_ = true;
+    gPrefetchHttpBusy.store(false, std::memory_order_release);
     return false;
   }
   worker_ = std::move(job);
