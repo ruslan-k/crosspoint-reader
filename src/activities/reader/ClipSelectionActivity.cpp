@@ -410,13 +410,15 @@ bool ClipSelectionActivity::buildSelectedText(const int first, const int last, s
   return true;
 }
 
-bool ClipSelectionActivity::buildSentenceText(const int anchor, std::string& text) const {
+bool ClipSelectionActivity::buildSentenceText(const int anchor, std::string& text,
+                                              uint32_t* sentenceStartOffset) const {
   if (anchor < 0 || anchor >= static_cast<int>(wordCount)) return false;
   // Expand around the selected word, not the full highlighted range. The
   // selection already owns this and following pages, so boundaries can cross
   // line breaks and forward page turns without an extra EPUB parse.
   int first = anchor;
   while (first > 0 && !words[first].paragraphStart && !ai_sentence::isEnd(words[first - 1].text)) --first;
+  if (sentenceStartOffset) *sentenceStartOffset = words[first].startOffset;
   int last = anchor;
   while (last + 1 < static_cast<int>(wordCount) && !ai_sentence::isEnd(words[last].text) &&
          !words[last + 1].paragraphStart)
@@ -440,7 +442,8 @@ void ClipSelectionActivity::confirmSelection(const ClippingResult::Action action
   const size_t requiredHeap = CLIPPING_TEXT_MAX + 1 + (last - first + 1) * sizeof(uint16_t) + 1024;
   const bool lowMemory = heap.largestBlockBytes < CLIPPING_TEXT_MAX + 1 || heap.freeBytes < requiredHeap;
   if (lowMemory || !buildSelectedText(first, last, result.text) ||
-      (action == ClippingResult::Action::Translate && !buildSentenceText(first, result.sentence))) {
+      (action == ClippingResult::Action::Translate &&
+       !buildSentenceText(first, result.sentence, &result.sentenceStartOffset))) {
     static constexpr StrId OPTIONS[] = {StrId::STR_BACK};
     actionPopup.show(lowMemory ? StrId::STR_MEMORY_ERROR : StrId::STR_CLIPPING_TOO_LONG, OPTIONS, 1, 0, [](int) {});
     requestUpdate();

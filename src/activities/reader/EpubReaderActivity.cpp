@@ -620,8 +620,10 @@ void EpubReaderActivity::startClipSelection(const int initialX, const int initia
     }
     if (clipping.action == ClippingResult::Action::Translate) {
       auto translation =
-          makeUniqueNoThrow<AiSentenceTranslationActivity>(renderer, mappedInput, clipping.text, clipping.sentence,
-                                                            bookPath);
+          makeUniqueNoThrow<AiSentenceTranslationActivity>(
+              renderer, mappedInput, clipping.text, clipping.sentence, bookPath,
+              AiPrefetchOrigin{section.get(), spineIndex, startPage, clipping.sentenceStartOffset,
+                               clipping.startOffset});
       if (!translation) {
         LOG_ERR("AI", "Insufficient memory for translation screen");
         requestUpdate();

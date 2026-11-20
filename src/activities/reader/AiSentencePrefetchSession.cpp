@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "AITranslationStore.h"
 #include "RenderLock.h"
 #include "clippings/ClippingText.h"
 #include "util/AiApiEndpoint.h"

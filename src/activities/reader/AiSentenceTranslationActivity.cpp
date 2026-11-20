@@ -21,6 +21,7 @@
 #include <utility>
 
 #include "AITranslationStore.h"
+#include "AiSentencePrefetchSession.h"
 #include "CrossPointSettings.h"
 #include "DictionaryDefinitionActivity.h"
 #include "MappedInputManager.h"
@@ -193,11 +194,12 @@ bool extractTranslationText(const std::string& raw, std::string& word, std::stri
 
 AiSentenceTranslationActivity::AiSentenceTranslationActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                                              std::string word, std::string sentence,
-                                                             std::string bookPath)
+                                                             std::string bookPath, AiPrefetchOrigin origin)
     : Activity("AiSentenceTranslation", renderer, mappedInput),
       word_(std::move(word)),
       sentence_(std::move(sentence)),
-      bookPath_(std::move(bookPath)) {}
+      bookPath_(std::move(bookPath)),
+      origin_(origin) {}
 
 AiSentenceTranslationActivity::~AiSentenceTranslationActivity() { releaseBackground(); }
 
@@ -335,6 +337,23 @@ void AiSentenceTranslationActivity::onEnter() {
     openResult(std::move(cachedWord), std::move(cachedSentence));
     return;
   }
+
+  // Picco lookahead records include a position-specific word mapping and
+  // allow an instant offline result even when the foreground exact cache misses.
+#if defined(FREEINK_DEVICE_PICCO)
+  if (origin_.sentenceStartOffset != UINT32_MAX && origin_.selectedWordOffset != UINT32_MAX) {
+    const ai_prefetch::Scope scope{bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel()};
+    ai_prefetch::Sentence needle;
+    needle.spine = origin_.spine;
+    needle.start = origin_.sentenceStartOffset;
+    needle.end = UINT32_MAX;
+    needle.source = sentence_;
+    if (ai_prefetch::lookup(scope, needle, origin_.selectedWordOffset, word_, cachedWord, cachedSentence)) {
+      openResult(std::move(cachedWord), std::move(cachedSentence));
+      return;
+    }
+  }
+#endif
 
   if (auto* fontCache = renderer.getFontCacheManager()) fontCache->releaseSdFontCaches();
 
@@ -598,6 +617,15 @@ void AiSentenceTranslationActivity::openResult(std::string wordTranslation, std:
     state_ = State::Showing;
   }
   requestUpdate();
+#if defined(FREEINK_DEVICE_PICCO)
+  // Do not scan or do TLS here: one small page/word scan is scheduled per
+  // later UI loop tick. The session exists ONLY while this modal is active.
+  if (!prefetch_ && origin_.section && origin_.selectedWordOffset != UINT32_MAX) {
+    ai_prefetch::Scope scope{bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel()};
+    prefetch_ = makeUniqueNoThrow<AiSentencePrefetchSession>(
+        std::move(scope), origin_.section, origin_.spine, origin_.firstPage, origin_.selectedWordOffset);
+  }
+#endif
 }
 
 void AiSentenceTranslationActivity::loop() {
@@ -632,12 +660,16 @@ void AiSentenceTranslationActivity::loop() {
       const AiPopupRect rect = aiPopupRect(renderer);
       if (x < rect.x || x >= rect.x + rect.width || y < rect.y || y >= rect.y + rect.height) {
         finish();
+        return;  // No new work after requesting dismissal.
       } else if (y >= rect.y + AI_POPUP_TITLE_HEIGHT && y < rect.y + rect.height - AI_POPUP_FOOTER_HEIGHT) {
         // Taps on the upper/lower half scroll a few lines; swipes scroll a page.
         const int middle = rect.y + rect.height / 2;
         scrollPopup(y < middle ? -4 : 4);
       }
     }
+#if defined(FREEINK_DEVICE_PICCO)
+    if (prefetch_) prefetch_->tick();
+#endif
     return;
   }
   if (!requestPending_) return;
@@ -658,6 +690,10 @@ void AiSentenceTranslationActivity::loop() {
 
 void AiSentenceTranslationActivity::onExit() {
   Activity::onExit();
+  if (prefetch_) {
+    prefetch_->cancel();
+    prefetch_.reset();
+  }
   releaseBackground();
   if (wifiOwned_) {
     WiFi.disconnect(false);

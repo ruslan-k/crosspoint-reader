@@ -91,7 +91,7 @@ class ClipSelectionActivity final : public Activity {
   int textXOffset() const;
   void cancel();
   bool buildSelectedText(int first, int last, std::string& text) const;
-  bool buildSentenceText(int anchor, std::string& text) const;
+  bool buildSentenceText(int anchor, std::string& text, uint32_t* sentenceStartOffset = nullptr) const;
   void drawSelection() const;
   bool renderIncremental();
   void ditherGapBetween(const WordBox& a, const WordBox& b, int offsetX, int offset) const;

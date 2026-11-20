@@ -25,6 +25,8 @@ class AiSentencePrefetchSession {
   void tick();
   void cancel();
 
+  struct Job;  // Worker owns copies; no pointers to activity or EPUB section.
+
  private:
   struct Token {
     const TextBlock* block = nullptr;  // Borrowed only while page_ is alive.
@@ -33,8 +35,6 @@ class AiSentencePrefetchSession {
     uint32_t end = 0;
     bool paragraph = false;
   };
-  struct Job;
-
   bool openPage();
   void acceptToken(const Token& token);
   void completeSentence();
