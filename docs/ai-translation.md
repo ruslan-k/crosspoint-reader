@@ -37,7 +37,7 @@ An already-complete `/chat/completions` URL is also accepted.
 - The web interface itself is served over local HTTP; only configure on
   trusted Wi-Fi, and do not expose the device's web server to the internet.
 - Outbound requests use wolfSSL TLS chain and hostname verification with a
-  small built-in CA set (GTS R1, ISRG Root X1, DigiCert Global Root G2).
+  small built-in CA set (GTS R1/R2/R3/R4, ISRG Root X1, DigiCert Global Root G2).
   Unrecognised CA chains fail closed; no `setInsecure()` fallback.
 - Wi-Fi starts on demand. The translation activity first tries the last
   successfully connected saved network, then asynchronously scans for other
@@ -49,6 +49,13 @@ An already-complete `/chat/completions` URL is also accepted.
   translated word and Original/Translation page opens on success.
 - Wi-Fi is switched off when leaving the translation if it was started by
   this activity. Pre-existing Wi-Fi sessions are left running.
+- If the serial console shows wolfSSL error `-188` (`ASN_NO_SIGNER_E`),
+  the AI server's signing CA is not in the embedded trust store or its
+  certificate chain is incomplete. Do not disable TLS verification. A
+  different custom provider may require adding its documented public CA.
+- Some OpenCode Console free-tier models are restricted to the OpenCode
+  application rather than third-party clients. For BYOK on a reader, use a
+  provider/model combination that permits external API usage.
 - Translation requires active Wi-Fi and a valid system clock. API quotas
   and billing are controlled by the respective provider.
 
