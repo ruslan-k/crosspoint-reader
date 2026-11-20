@@ -347,7 +347,7 @@ bool AiSentencePrefetchSession::openPage() {
       const auto range = block->wordSourceRange(i);
       const char* word = block->wordText(i);
       if (range.start == UINT32_MAX || range.end == UINT32_MAX || range.end <= range.start ||
-          !clippingText::hasVisibleText(word)) continue;
+          range.end <= lastWordEnd_ || !clippingText::hasVisibleText(word)) continue;
       if (pageTokens_.size() >= MAX_PAGE_TOKENS) {
         disabled_ = true;
         pageTokens_.clear();
@@ -426,7 +426,15 @@ void AiSentencePrefetchSession::finishScan() {
 }
 
 bool AiSentencePrefetchSession::launchBatch() {
-  if (batch_.empty() || !memoryReady()) return false;
+  if (batch_.empty()) return false;
+  // Do not retain a full EPUB page token list while mbedTLS is allocating its
+  // internal buffers. The next Translate tick may safely reload this SAME
+  // prepared page and skip already-consumed source offsets after the batch.
+  if (tokenIndex_ < pageTokens_.size() && nextPage_ > 0) --nextPage_;
+  pageTokens_.clear();
+  std::vector<Token>().swap(pageTokens_);
+  tokenIndex_ = 0;
+  if (!memoryReady()) return false;
   auto job = std::make_unique<Job>();
   job->scope = scope_;
   job->batch = std::move(batch_);
@@ -508,6 +516,10 @@ void AiSentencePrefetchSession::tick() {
     return;
   }
   reportedMemoryPause_ = false;
+  if (batch_.size() >= ai_prefetch::BATCH_SENTENCES) {
+    launchBatch();  // Retry a prepared batch before reading another page.
+    return;
+  }
   if (scanEnded_ || considered_ >= ai_prefetch::WINDOW_SENTENCES) {
     finishScan();
     if (!batch_.empty()) launchBatch();
