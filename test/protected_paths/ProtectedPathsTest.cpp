@@ -10,6 +10,8 @@ TEST(ProtectedPaths, CredentialStoresAreSensitive) {
   EXPECT_TRUE(isSensitivePath("/.crosspoint/opds.json"));
   EXPECT_TRUE(isSensitivePath("/.crosspoint/koreader.json"));
   EXPECT_TRUE(isSensitivePath("/.crosspoint/wifi.json.tmp"));
+  EXPECT_TRUE(isSensitivePath("/.crosspoint/ai-cache/1234567890123456/abcdef.bin"));
+  EXPECT_FALSE(isPluginPath("/.crosspoint/ai-cache/1234567890123456/abcdef.bin"));
   EXPECT_TRUE(isSensitivePath("/.CrossPoint/WIFI.json"));
 }
 
