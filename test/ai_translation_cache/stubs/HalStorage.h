@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <unistd.h>
 
 class HalFile {
  public:
@@ -45,7 +46,8 @@ class HalStorage {
     return instance;
   }
   static const std::filesystem::path& root() {
-    static const std::filesystem::path path = std::filesystem::temp_directory_path() / "crosspoint_ai_cache_unit";
+    static const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / ("crosspoint_ai_cache_unit_" + std::to_string(getpid()));
     return path;
   }
   static std::filesystem::path hostPath(const std::string& path) {
