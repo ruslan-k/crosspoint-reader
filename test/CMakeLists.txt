@@ -111,6 +111,9 @@ add_subdirectory(protected_paths)
 add_executable(ai_sentence_utils ai_sentence/AiSentenceUtilsTest.cpp)
 add_test(NAME ai_sentence_utils COMMAND ai_sentence_utils)
 
+add_executable(ai_api_endpoint ai_sentence/AiApiEndpointTest.cpp)
+add_test(NAME ai_api_endpoint COMMAND ai_api_endpoint)
+
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(NAME secureclient_ca_patch COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/scripts/patch_wolfssl.py --self-test)
 add_test(NAME ai_trust_roots COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_ai_tls_roots.py)

@@ -20,10 +20,15 @@ the existing key; **Remove saved API key** clears it.
 | --- | --- | --- |
 | Gemini | `https://generativelanguage.googleapis.com/v1beta` | `gemini-2.5-flash` |
 | Groq | `https://api.groq.com/openai/v1` | `openai/gpt-oss-20b` |
-| OpenCode Go | `https://opencode.ai/zen/go/v1` | `deepseek-v4.1-flash` |
+| OpenCode Go | `https://opencode.ai/inference/go/openai/v1` | `deepseek-v4.1-flash` |
 
 Gemini calls `models/{model}:generateContent` with `x-goog-api-key`.
 Other endpoints use OpenAI-compatible `/chat/completions` with a Bearer key.
+The legacy OpenCode Go URL `/zen/go/v1` is normalized **in memory**
+to `/inference/go/openai/v1`, without altering the saved key. For OpenCode Go,
+only `model` and `messages` are sent, matching the official API example.
+Select a Go model actually listed in the account; IDs such as
+`hy4-flash-free` are not in the currently published Go catalogue.
 An already-complete `/chat/completions` URL is also accepted.
 
 ## Privacy and security
@@ -79,6 +84,15 @@ word wrapping and page navigation are shared with dictionary display. Cyrillic
 output requires an available font containing Cyrillic glyphs.
 
 ## ESP-IDF HTTPS transport A/B
+
+The device logs through `serial-log (8).txt` on the mbedTLS firmware
+`7fa72c3` confirm successful TLS and an HTTP 400 (206-byte provider error).
+The previous implementation hid the provider error body. The next revision
+logs only status, model and machine-readable error type/code; on the local
+E-Ink screen it shows a bounded, control-character-filtered provider error
+message (with reflected API keys and complete sentences hidden). This
+helps distinguish obsolete endpoints and unknown model IDs without leaking
+book text or credentials into serial logs.
 
 The device log `serial-log (7).txt` on firmware `25852e3` confirms a
 successful saved Wi-Fi connection and a successful wolfSSL trust-store load

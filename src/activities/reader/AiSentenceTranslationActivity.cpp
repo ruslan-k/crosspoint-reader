@@ -23,6 +23,7 @@
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/AiApiEndpoint.h"
 #include "util/AiTranslationRoots.h"
 
 namespace {
@@ -31,6 +32,39 @@ constexpr size_t MAX_RESPONSE_BYTES = 8 * 1024;
 constexpr size_t MAX_SENTENCE_BYTES = 2048;
 constexpr uint32_t MIN_FREE_FOR_TLS = 35000;
 constexpr uint32_t MIN_BLOCK_FOR_TLS = 20000;
+
+// Do not send model output or the full provider error body to serial. Only
+// machine-readable provider error identifiers are included in diagnostic logs.
+std::string safeErrorId(const char* value) {
+  if (!value) return "none";
+  std::string safe;
+  while (*value && safe.size() < 64) {
+    const unsigned char c = static_cast<unsigned char>(*value++);
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+        c == '_' || c == '-' || c == '.' || c == '/') {
+      safe += static_cast<char>(c);
+    }
+  }
+  return safe.empty() ? "none" : safe;
+}
+
+// A provider may echo parts of the user prompt in an error. Error messages
+// appear only on the local E-Ink screen, never in logs. Explicitly hide any
+// reflected API key or complete sentence, and strip terminal/control codes.
+std::string safeScreenError(const char* raw, const std::string& key, const std::string& sentence) {
+  if (!raw) return "";
+  const std::string full(raw);
+  if ((!key.empty() && full.find(key) != std::string::npos) ||
+      (sentence.size() >= 6 && full.find(sentence) != std::string::npos)) {
+    return "Provider error (details hidden)";
+  }
+  std::string result;
+  for (const unsigned char c : full) {
+    if (result.size() >= 180) break;
+    if (c >= 32 && c != 127) result += static_cast<char>(c);
+  }
+  return result;
+}
 
 // Bounded response buffer: an unexpectedly large provider response must not
 // exhaust internal RAM while ESP-IDF/mbedTLS is holding the TLS session.
@@ -154,7 +188,10 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
   }
 
   const auto& config = AI_TRANSLATION_STORE;
-  std::string url = config.getUrl();
+  std::string url = ai_endpoint::migrateOpenCodeGoUrl(config.getUrl());
+  if (url != config.getUrl()) {
+    LOG_INF("AI", "Using current OpenCode Go API URL (legacy URL migrated in memory)");
+  }
   if (!safeEndpoint(url)) {
     fail(tr(STR_AI_NOT_CONFIGURED));
     return false;
@@ -190,7 +227,9 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
     req["generationConfig"].to<JsonObject>()["maxOutputTokens"] = 384;
   } else {
     req["model"] = config.getModel();
-    req["max_tokens"] = 384;
+    // Go's published Chat Completions example only requires model/messages;
+    // do not send optional token fields to legacy API adapters.
+    if (!ai_endpoint::isOpenCodeGoUrl(url)) req["max_tokens"] = 384;
     JsonObject msg = req["messages"].to<JsonArray>().add<JsonObject>();
     msg["role"] = "user";
     msg["content"] = prompt;
@@ -270,12 +309,24 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
   esp_http_client_cleanup(client);
 
   if (result != ESP_OK || response.overflow || status != 200) {
+    JsonDocument providerError;
+    const bool jsonError =
+        !response.overflow && deserializeJson(providerError, response.data) == DeserializationError::Ok;
+    const char* providerType = jsonError ? providerError["error"]["type"].as<const char*>() : nullptr;
+    const char* providerCode = jsonError ? providerError["error"]["code"].as<const char*>() : nullptr;
+    const char* providerMessage = jsonError ? providerError["error"]["message"].as<const char*>() : nullptr;
+    if (!providerMessage && jsonError) providerMessage = providerError["message"].as<const char*>();
+    if (!providerMessage && jsonError) providerMessage = providerError["error"].as<const char*>();
+
+    LOG_ERR("AI", "Provider request failed: model=%s status=%d type=%s code=%s", config.getModel().c_str(),
+            status, safeErrorId(providerType).c_str(), safeErrorId(providerCode).c_str());
     LOG_ERR("AI", "Translation HTTP failed: status=%d response_bytes=%u", status,
             static_cast<unsigned>(response.data.size()));
     if (status > 0) {
       char statusText[32];
       snprintf(statusText, sizeof(statusText), "HTTP %d", status);
-      fail(statusText);
+      const std::string explanation = safeScreenError(providerMessage, config.getKey(), sentence_);
+      fail(explanation.empty() ? std::string(statusText) : std::string(statusText) + ": " + explanation);
     } else {
       fail(tr(STR_AI_NETWORK_FAILED));
     }
