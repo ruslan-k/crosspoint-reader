@@ -206,8 +206,9 @@ bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, 
       return false;
   } else {
     if (!request.append("{\"model\":") || !request.quoted(model) ||
-        !request.append(streaming ? ",\"max_tokens\":6144,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":"
-                                  : ",\"max_tokens\":6144,\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":") ||
+        !request.append(streaming
+                            ? ",\"max_tokens\":6144,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":"
+                            : ",\"max_tokens\":6144,\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":") ||
         !request.quoted(prompt.view()) || !request.append("}]}"))
       return false;
   }
@@ -441,8 +442,8 @@ void AiSentencePrefetchSession::pollBatch() {
     if (job.stored[i]) ++savedCount;
   }
   LOG_INF("AI_PRE", "Stream stored %u/%u sentences, HTTP=%d transport=%d frames=%u parts=%u%s",
-          static_cast<unsigned>(savedCount), static_cast<unsigned>(job.batch.size()), status,
-          static_cast<int>(result), static_cast<unsigned>(job.sseFrames), static_cast<unsigned>(job.textParts),
+          static_cast<unsigned>(savedCount), static_cast<unsigned>(job.batch.size()), status, static_cast<int>(result),
+          static_cast<unsigned>(job.sseFrames), static_cast<unsigned>(job.textParts),
           job.parseError ? " parse-limit" : "");
   if (job.streaming && status == 200 && savedCount == 0 &&
       (result == ESP_ERR_HTTP_INCOMPLETE_DATA || result == ESP_OK)) {
@@ -666,7 +667,8 @@ bool AiSentencePrefetchSession::launchBatch() {
   esp_err_t result = esp_http_client_set_header(job->client, "Content-Type", "application/json");
   if (result == ESP_OK) result = esp_http_client_set_header(job->client, "User-Agent", "CrossPoint-AI-Prefetch");
   if (result == ESP_OK)
-    result = esp_http_client_set_header(job->client, "Accept", job->streaming ? "text/event-stream" : "application/json");
+    result =
+        esp_http_client_set_header(job->client, "Accept", job->streaming ? "text/event-stream" : "application/json");
   if (result == ESP_OK && job->gemini) {
     result = esp_http_client_set_header(job->client, "x-goog-api-key", AI_TRANSLATION_STORE.getKey().c_str());
   } else if (result == ESP_OK) {
