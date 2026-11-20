@@ -28,4 +28,11 @@ for item in required:
 assert "DictionaryDefinitionActivity>(" not in src, "Old full-screen result activity remains"
 assert "Showing" in hdr and "popupScroll_" in hdr
 assert "MAX_SELECTABLE_WORDS = 320" in clip
+assert '"Swipe to scroll"' not in src
+assert 'char progress[32]' not in src
+assert 'renderer.drawText(UI_12_FONT_ID, rect.x + rect.width - 48' not in src
+assert "AI_POPUP_FOOTER_HEIGHT = 0" in src
+assert "UI_10_FONT_ID" in src
+assert "ai_translation_cache::load(" in src
+assert "ai_translation_cache::save(" in src
 print("AI translation popup, scrolling, and selection guards passed")
