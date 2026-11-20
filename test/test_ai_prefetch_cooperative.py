@@ -18,7 +18,7 @@ assert "HTTP_READ_IDLE_TIMEOUT_MS = 6000" in prefetch
 assert "cfg.timeout_ms = HTTP_READ_IDLE_TIMEOUT_MS;" in prefetch
 assert "HTTP_STEP_TIMEOUT_MS = 100" not in prefetch
 assert "std::atomic<bool> gPrefetchTaskBusy" in prefetch
-assert "gNonStreamingEndpoint = job.scope.url;" in prefetch
+assert "gNonStreamingEndpoint = worker_->scope.url;" in prefetch
 assert "onDataReady" in prefetch
 assert "result->onDataReady(result->onDataContext)" in prefetch
 assert "JsonDocument chunk(&gPsramJsonAllocator)" in prefetch
