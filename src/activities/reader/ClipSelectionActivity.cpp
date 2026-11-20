@@ -413,7 +413,8 @@ bool ClipSelectionActivity::buildSentenceText(const int anchor, std::string& tex
   while (first > 0 && !words[first].paragraphStart && !ai_sentence::isEnd(words[first - 1].text)) --first;
   int last = anchor;
   while (last + 1 < static_cast<int>(wordCount) && !ai_sentence::isEnd(words[last].text) &&
-         !words[last + 1].paragraphStart) ++last;
+         !words[last + 1].paragraphStart)
+    ++last;
   return buildSelectedText(first, last, text);
 }
 
@@ -711,9 +712,9 @@ Rect ClipSelectionActivity::actionRect() const {
   safe.width = rightEdge - safe.x;
   safe.height = bottomEdge - safe.y;
   const int font = uiScaleSpec().smallFontId;
-  const int labelWidth =
-      std::max({renderer.getTextWidth(font, tr(STR_LOOKUP)), renderer.getTextWidth(font, tr(STR_CLIP)),
-                renderer.getTextWidth(font, tr(STR_BOOKMARK_OPTION)), renderer.getTextWidth(font, tr(STR_AI_TRANSLATE))});
+  const int labelWidth = std::max(
+      {renderer.getTextWidth(font, tr(STR_LOOKUP)), renderer.getTextWidth(font, tr(STR_CLIP)),
+       renderer.getTextWidth(font, tr(STR_BOOKMARK_OPTION)), renderer.getTextWidth(font, tr(STR_AI_TRANSLATE))});
   const int padding = metrics.menuSpacing;
   const int count = actionCount();
   const int width = std::min(safe.width, count * (labelWidth + padding * 2) + padding * (count + 1));

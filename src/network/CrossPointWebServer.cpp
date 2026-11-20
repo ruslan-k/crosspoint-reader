@@ -1777,19 +1777,18 @@ void CrossPointWebServer::handlePostAiTranslation() {
     return;
   }
   JsonDocument doc;
-  if (deserializeJson(doc, server->arg("plain")) != DeserializationError::Ok ||
-      !doc["url"].is<const char*>() || !doc["model"].is<const char*>()) {
+  if (deserializeJson(doc, server->arg("plain")) != DeserializationError::Ok || !doc["url"].is<const char*>() ||
+      !doc["model"].is<const char*>()) {
     server->send(400, "text/plain", "Invalid AI translation settings");
     return;
   }
   const std::string url = doc["url"].as<const char*>();
   const std::string model = doc["model"].as<const char*>();
-  const bool urlOk = url.empty() || (url.size() >= 12 && url.size() <= 255 &&
-      url.compare(0, 8, "https://") == 0 && url.find('/', 8) != 8 &&
-      url.find_first_of("?#@\r\n\t ") == std::string::npos);
+  const bool urlOk = url.empty() || (url.size() >= 12 && url.size() <= 255 && url.compare(0, 8, "https://") == 0 &&
+                                     url.find('/', 8) != 8 && url.find_first_of("?#@\r\n\t ") == std::string::npos);
   const bool modelOk = model.size() <= 96 && std::all_of(model.begin(), model.end(), [](unsigned char c) {
-    return std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '/';
-  });
+                         return std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '/';
+                       });
   if (!urlOk || !modelOk) {
     server->send(400, "text/plain", "Use HTTPS URL and valid model name");
     return;

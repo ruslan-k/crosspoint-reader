@@ -8,8 +8,8 @@
 // No Linga endpoints, history, related words or vocabulary writes.
 class AiSentenceTranslationActivity final : public Activity {
  public:
-  AiSentenceTranslationActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                std::string word, std::string sentence);
+  AiSentenceTranslationActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string word,
+                                std::string sentence);
   void onEnter() override;
   void onExit() override;
   void loop() override;

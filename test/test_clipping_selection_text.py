@@ -56,6 +56,7 @@ harness = r"""
 #undef LOG_DBG
 #define LOG_DBG(module, ...) (void)std::snprintf(nullptr, 0, __VA_ARGS__)
 #include "clippings/ClippingText.h"
+#include "util/AiSentenceUtils.h"
 #include "ClippingStore.h"
 #include <Epub/ReaderRenderSpec.h>
 namespace BidiUtils { enum class BidiBaseDir : int8_t { AUTO = -1, LTR = 0, RTL = 1 }; }
@@ -317,6 +318,7 @@ struct ClipSelectionActivity {
   int lastRenderedPageOffset = 0, lastRenderedSelected = 0, lastRenderedRangeStart = -1;
   int lastRenderedTextOffset = 0, lastRenderedTextXOffset = 0;
   bool buildSelectedText(int first, int last, std::string& text) const;
+  bool buildSentenceText(int anchor, std::string& text) const;
   bool extractWords();
   void drawSelection() const;
   bool renderIncremental();

@@ -42,7 +42,8 @@ std::string trim(std::string s) {
 
 bool safeEndpoint(const std::string& url) {
   if (url.size() < 12 || url.size() > 255 || url.compare(0, 8, "https://") != 0 ||
-      url.find_first_of("?#@\r\n\t ") != std::string::npos) return false;
+      url.find_first_of("?#@\r\n\t ") != std::string::npos)
+    return false;
   return url.find('/', 8) != 8 && url.find(':', 8) != 8;
 }
 
@@ -66,8 +67,7 @@ bool extractLabeledTranslation(const std::string& output, std::string& word, std
 
 }  // namespace
 
-AiSentenceTranslationActivity::AiSentenceTranslationActivity(GfxRenderer& renderer,
-                                                             MappedInputManager& mappedInput,
+AiSentenceTranslationActivity::AiSentenceTranslationActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                                              std::string word, std::string sentence)
     : Activity("AiSentenceTranslation", renderer, mappedInput),
       word_(std::move(word)),
@@ -141,8 +141,7 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
   const bool gemini = url == "https://generativelanguage.googleapis.com" ||
                       url.rfind("https://generativelanguage.googleapis.com/", 0) == 0;
   if (gemini) {
-    if (config.getModel().find('/') != std::string::npos ||
-        config.getModel().find(':') != std::string::npos) {
+    if (config.getModel().find('/') != std::string::npos || config.getModel().find(':') != std::string::npos) {
       fail(tr(STR_AI_NOT_CONFIGURED));
       return false;
     }
@@ -160,7 +159,8 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
       "Reply with exactly two lines, without markdown or commentary:\n"
       "WORD: <Russian translation of the word>\n"
       "SENTENCE: <Fluent Russian translation of the entire sentence>\n\n"
-      "Selected word: " + word_ + "\nSource sentence: " + sentence_;
+      "Selected word: " +
+      word_ + "\nSource sentence: " + sentence_;
 
   JsonDocument req;
   if (gemini) {
@@ -200,16 +200,15 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
   std::string response;
   response.reserve(2048);
   bool overflow = false;
-  const int status = http.sendRequest(
-      "POST", reinterpret_cast<const uint8_t*>(body.data()), body.size(),
-      [&](const uint8_t* data, const size_t len) {
-        if (len > MAX_RESPONSE_BYTES - response.size()) {
-          overflow = true;
-          return false;
-        }
-        response.append(reinterpret_cast<const char*>(data), len);
-        return true;
-      });
+  const int status = http.sendRequest("POST", reinterpret_cast<const uint8_t*>(body.data()), body.size(),
+                                      [&](const uint8_t* data, const size_t len) {
+                                        if (len > MAX_RESPONSE_BYTES - response.size()) {
+                                          overflow = true;
+                                          return false;
+                                        }
+                                        response.append(reinterpret_cast<const char*>(data), len);
+                                        return true;
+                                      });
   const bool complete = http.responseComplete();
   http.end();
 
@@ -237,8 +236,7 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
 
 void AiSentenceTranslationActivity::openResult(std::string wordTranslation, std::string sentenceTranslation) {
   std::string definition;
-  definition.reserve(word_.size() + wordTranslation.size() + sentence_.size() +
-                     sentenceTranslation.size() + 64);
+  definition.reserve(word_.size() + wordTranslation.size() + sentence_.size() + sentenceTranslation.size() + 64);
   definition += word_;
   definition += " — ";
   definition += wordTranslation;
@@ -297,9 +295,9 @@ void AiSentenceTranslationActivity::render(RenderLock&&) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect area = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
   GUI.drawHeader(renderer, Rect{area.x, area.y, area.width, metrics.headerHeight}, tr(STR_AI_TRANSLATE));
-  const char* status = state_ == State::Connecting ? tr(STR_CONNECTING)
-                     : state_ == State::Translating ? tr(STR_AI_TRANSLATING)
-                     : error_.c_str();
+  const char* status = state_ == State::Connecting    ? tr(STR_CONNECTING)
+                       : state_ == State::Translating ? tr(STR_AI_TRANSLATING)
+                                                      : error_.c_str();
   const Rect body{area.x + metrics.contentSidePadding, area.y + metrics.headerHeight + metrics.verticalSpacing,
                   area.width - 2 * metrics.contentSidePadding,
                   area.height - metrics.headerHeight - metrics.buttonHintsHeight - metrics.verticalSpacing};

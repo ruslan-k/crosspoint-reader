@@ -1,6 +1,6 @@
-#include "../../src/util/AiSentenceUtils.h"
-
 #include <cassert>
+
+#include "../../src/util/AiSentenceUtils.h"
 
 int main() {
   assert(ai_sentence::isEnd("world."));

@@ -25,8 +25,8 @@
 #include <limits>
 
 #include "../../util/BookmarkFile.h"
-#include "BookmarkEntry.h"
 #include "AiSentenceTranslationActivity.h"
+#include "BookmarkEntry.h"
 #include "ChapterBuildGate.h"
 #include "ClipSelectionActivity.h"
 #include "ClippingStore.h"
@@ -619,8 +619,8 @@ void EpubReaderActivity::startClipSelection(const int initialX, const int initia
       return;
     }
     if (clipping.action == ClippingResult::Action::Translate) {
-      auto translation = makeUniqueNoThrow<AiSentenceTranslationActivity>(
-          renderer, mappedInput, clipping.text, clipping.sentence);
+      auto translation =
+          makeUniqueNoThrow<AiSentenceTranslationActivity>(renderer, mappedInput, clipping.text, clipping.sentence);
       if (!translation) {
         LOG_ERR("AI", "Insufficient memory for translation screen");
         requestUpdate();

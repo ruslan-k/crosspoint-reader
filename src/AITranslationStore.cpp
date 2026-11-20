@@ -29,8 +29,8 @@ bool AITranslationStore::fromJson(JsonVariantConst doc) {
   return true;
 }
 
-bool AITranslationStore::configure(const std::string& url, const std::string& model,
-                                   const std::string& key, const bool replaceKey) {
+bool AITranslationStore::configure(const std::string& url, const std::string& model, const std::string& key,
+                                   const bool replaceKey) {
   url_ = url;
   model_ = model;
   if (replaceKey) key_ = key;
