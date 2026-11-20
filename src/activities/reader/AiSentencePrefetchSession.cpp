@@ -28,9 +28,9 @@
 #include "activities/RenderLock.h"
 #include "clippings/ClippingText.h"
 #include "util/AiApiEndpoint.h"
-#include "util/AiSentenceUtils.h"
-#include "util/AiPrefetchStream.h"
 #include "util/AiBoundedJsonWriter.h"
+#include "util/AiPrefetchStream.h"
+#include "util/AiSentenceUtils.h"
 #include "util/AiTranslationRoots.h"
 
 namespace {
@@ -155,34 +155,32 @@ std::string getOutput(const Response& response, bool gemini) {
   return output.size() <= 24 * 1024 ? output : std::string{};
 }
 
-bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, const std::string& model,
-                  char* body, size_t capacity, size_t& bodyBytes) {
+bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, const std::string& model, char* body,
+                  size_t capacity, size_t& bodyBytes) {
   // All large serialization buffers are in PSRAM. No intermediate ArduinoJson
   // documents, copied prompt strings or payload strings occupy internal heap.
   auto promptBuffer = HalMemory::allocatePsram(17 * 1024);
   if (!promptBuffer || !body) return false;
   ai_prefetch::BoundedJsonWriter prompt(reinterpret_cast<char*>(promptBuffer.get()), 17 * 1024);
-  if (!prompt.append(
-          "Translate the numbered source text into Russian. Return one compact, standalone JSON object "
-          "per sentence (NDJSON), in increasing id order, as soon as each is ready. "
-          "Schema: {\"id\":0,\"translation\":\"...\",\"words\":[{\"i\":0,\"translation\":\"...\"}]}. "
-          "Omit the sentence translation if need_sentence=false. The words arrays contain "
-          "ONLY missing contextual word translations; return all you can without placeholders, "
-          "unnecessary explanations, markdown fences or an enclosing items array. "
-          "Each word translation should be brief. Source:\n{\"sentences\":["))
+  if (!prompt.append("Translate the numbered source text into Russian. Return one compact, standalone JSON object "
+                     "per sentence (NDJSON), in increasing id order, as soon as each is ready. "
+                     "Schema: {\"id\":0,\"translation\":\"...\",\"words\":[{\"i\":0,\"translation\":\"...\"}]}. "
+                     "Omit the sentence translation if need_sentence=false. The words arrays contain "
+                     "ONLY missing contextual word translations; return all you can without placeholders, "
+                     "unnecessary explanations, markdown fences or an enclosing items array. "
+                     "Each word translation should be brief. Source:\n{\"sentences\":["))
     return false;
   for (size_t i = 0; i < batch.size(); ++i) {
     if (i && !prompt.append(",")) return false;
-    if (!prompt.append("{\"id\":") || !prompt.integer(static_cast<unsigned>(i)) ||
-        !prompt.append(",\"text\":") || !prompt.quoted(batch[i].source) ||
+    if (!prompt.append("{\"id\":") || !prompt.integer(static_cast<unsigned>(i)) || !prompt.append(",\"text\":") ||
+        !prompt.quoted(batch[i].source) ||
         !prompt.append(batch[i].translation.empty() ? ",\"need_sentence\":true,\"words\":["
-                                                     : ",\"need_sentence\":false,\"words\":["))
+                                                    : ",\"need_sentence\":false,\"words\":["))
       return false;
     for (size_t w = 0; w < batch[i].words.size(); ++w) {
       if (w && !prompt.append(",")) return false;
-      if (!prompt.append("{\"i\":") || !prompt.integer(static_cast<unsigned>(w)) ||
-          !prompt.append(",\"text\":") || !prompt.quoted(batch[i].words[w].source) ||
-          !prompt.append("}"))
+      if (!prompt.append("{\"i\":") || !prompt.integer(static_cast<unsigned>(w)) || !prompt.append(",\"text\":") ||
+          !prompt.quoted(batch[i].words[w].source) || !prompt.append("}"))
         return false;
     }
     if (!prompt.append("]}")) return false;
@@ -206,8 +204,8 @@ bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, 
 
 // A model can return only a sentence, only a subset of requested words, or
 // both. Persist every validated fragment; the cache merges it with old data.
-bool saveItem(JsonVariantConst item, const ai_prefetch::Scope& scope,
-              const std::vector<ai_prefetch::Sentence>& batch, bool* stored) {
+bool saveItem(JsonVariantConst item, const ai_prefetch::Scope& scope, const std::vector<ai_prefetch::Sentence>& batch,
+              bool* stored) {
   if (!item["id"].is<int>()) return false;
   const int id = item["id"].as<int>();
   if (id < 0 || id >= static_cast<int>(batch.size())) return false;
@@ -223,8 +221,7 @@ bool saveItem(JsonVariantConst item, const ai_prefetch::Scope& scope,
       if (!word["i"].is<int>()) continue;
       const int i = word["i"].as<int>();
       const char* value = word["translation"].as<const char*>();
-      if (i < 0 || i >= static_cast<int>(batch[id].words.size()) || used[i] || !value || !*value ||
-          strlen(value) > 256)
+      if (i < 0 || i >= static_cast<int>(batch[id].words.size()) || used[i] || !value || !*value || strlen(value) > 256)
         continue;
       ai_prefetch::Word translatedWord = batch[id].words[i];
       translatedWord.translation = value;
@@ -321,8 +318,8 @@ void AiSentencePrefetchSession::consumeStream() {
   Response& buffer = job.response;
   if (!job.classified) {
     size_t i = 0;
-    while (i < buffer.size && (buffer.data[i] == ' ' || buffer.data[i] == '\r' ||
-                               buffer.data[i] == '\n' || buffer.data[i] == '\t'))
+    while (i < buffer.size &&
+           (buffer.data[i] == ' ' || buffer.data[i] == '\r' || buffer.data[i] == '\n' || buffer.data[i] == '\t'))
       ++i;
     if (i == buffer.size) return;
     job.rawNonStreaming = buffer.data[i] == '{' || buffer.data[i] == '[';
@@ -335,8 +332,7 @@ void AiSentencePrefetchSession::consumeStream() {
     if (deserializeJson(chunk, frame.data(), frame.size()) != DeserializationError::Ok) return;
     const auto feedText = [&](const char* text) {
       if (!text || job.parseError) return;
-      if (!job.framer->feedModel(text, strlen(text),
-                                 [&](std::string_view record) { acceptStreamObject(record); })) {
+      if (!job.framer->feedModel(text, strlen(text), [&](std::string_view record) { acceptStreamObject(record); })) {
         job.parseError = true;
       }
     };
@@ -360,8 +356,7 @@ void AiSentencePrefetchSession::flushDeferred() {
     if (!job.deferred[id]) continue;
     // Retry completed JSON records only; never replay an incomplete fragment.
     JsonDocument parsed;
-    const bool valid =
-        deserializeJson(parsed, job.deferred[id], job.deferredBytes[id]) == DeserializationError::Ok;
+    const bool valid = deserializeJson(parsed, job.deferred[id], job.deferredBytes[id]) == DeserializationError::Ok;
     bool saved = false;
     if (valid) {
       JsonArrayConst items = parsed["items"].as<JsonArrayConst>();
@@ -426,9 +421,9 @@ void AiSentencePrefetchSession::pollBatch() {
   for (size_t i = 0; i < job.batch.size(); ++i) {
     if (job.stored[i]) ++savedCount;
   }
-  LOG_INF("AI_PRE", "Stream stored %u/%u sentences, HTTP=%d transport=%d%s",
-          static_cast<unsigned>(savedCount), static_cast<unsigned>(job.batch.size()), status,
-          static_cast<int>(result), job.parseError ? " parse-limit" : "");
+  LOG_INF("AI_PRE", "Stream stored %u/%u sentences, HTTP=%d transport=%d%s", static_cast<unsigned>(savedCount),
+          static_cast<unsigned>(job.batch.size()), status, static_cast<int>(result),
+          job.parseError ? " parse-limit" : "");
   const bool complete = result == ESP_OK && status == 200 && savedCount == job.batch.size();
   worker_.reset();
   if (!complete) disabled_ = true;  // Retry missing pieces on next Translate.
@@ -596,8 +591,8 @@ bool AiSentencePrefetchSession::launchBatch() {
   batch_.reserve(ai_prefetch::BATCH_SENTENCES);
   job->url = job->scope.url;
   if (!buildUrl(job->url, job->scope.model, job->gemini) ||
-      !buildRequest(job->batch, job->gemini, job->scope.model,
-                    reinterpret_cast<char*>(job->body.get()), MAX_BATCH_BODY, job->bodyBytes) ||
+      !buildRequest(job->batch, job->gemini, job->scope.model, reinterpret_cast<char*>(job->body.get()), MAX_BATCH_BODY,
+                    job->bodyBytes) ||
       !job->response.data || !job->framer || !trustedtime::trustedNow()) {
     // Do not reapply the 94 KiB preflight AFTER allocating JSON and response
     // buffers. TLS gets its own contiguous-block check just below.

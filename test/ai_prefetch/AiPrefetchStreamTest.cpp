@@ -64,7 +64,7 @@ TEST(AiPrefetchStream, SkipsMarkdownAndRespectsEscapes) {
 json
 {"id":0,"translation":"quote: \\" } "}
 end)JSON";
-  EXPECT_TRUE(framer.feedModel(response.data(), response.size(),
-                               [&](std::string_view record) { data.emplace_back(record); }));
+  EXPECT_TRUE(
+      framer.feedModel(response.data(), response.size(), [&](std::string_view record) { data.emplace_back(record); }));
   EXPECT_EQ(data.size(), 1u);
 }

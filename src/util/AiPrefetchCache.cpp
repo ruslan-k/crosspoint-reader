@@ -137,8 +137,8 @@ bool readRecord(const Scope& scope, const Sentence& needle, Sentence& loaded) {
   bool ok = file.read(&header, sizeof(header)) == sizeof(header) && header.magic == RECORD_MAGIC &&
             header.scopeHash == scopeHash && header.keyHash == keyHash && header.spine == needle.spine &&
             header.offset == needle.start && header.sourceBytes == needle.source.size() &&
-            (header.translatedBytes > 0 || header.wordCount > 0) &&
-            header.translatedBytes <= MAX_TRANSLATION && header.wordCount <= MAX_WORDS &&
+            (header.translatedBytes > 0 || header.wordCount > 0) && header.translatedBytes <= MAX_TRANSLATION &&
+            header.wordCount <= MAX_WORDS &&
             file.fileSize() <= sizeof(header) + MAX_SENTENCE_BYTES + MAX_TRANSLATION +
                                    MAX_WORDS * (sizeof(WordHeader) + MAX_WORD_BYTES + MAX_WORD_TRANSLATION);
   if (!ok) return false;
@@ -279,8 +279,7 @@ bool save(const Scope& scope, const Sentence& update) {
     if (!ok) break;
     const WordHeader wh{word.offset, static_cast<uint16_t>(word.source.size()),
                         static_cast<uint16_t>(word.translation.size())};
-    ok = file.write(&wh, sizeof(wh)) == sizeof(wh) && writePart(file, word.source) &&
-         writePart(file, word.translation);
+    ok = file.write(&wh, sizeof(wh)) == sizeof(wh) && writePart(file, word.source) && writePart(file, word.translation);
   }
   if (ok) file.flush();
   file.close();
