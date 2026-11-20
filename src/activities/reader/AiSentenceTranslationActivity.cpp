@@ -734,8 +734,7 @@ void AiSentenceTranslationActivity::loop() {
         known.words.push_back({origin_.selectedWordOffset, word_, wordTranslation_});
       }
       const ai_prefetch::Scope scope{bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel()};
-      LOG_INF("AI_CACHE", "Foreground seeded lookahead cache: %s",
-              ai_prefetch::save(scope, known) ? "ok" : "skipped");
+      LOG_INF("AI_CACHE", "Foreground seeded lookahead cache: %s", ai_prefetch::save(scope, known) ? "ok" : "skipped");
     }
 #endif
   } else if (retryPending_) {

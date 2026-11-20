@@ -590,16 +590,27 @@ bool AiSentencePrefetchSession::launchBatch() {
   batch_.clear();
   batch_.reserve(ai_prefetch::BATCH_SENTENCES);
   job->url = job->scope.url;
-  if (!buildUrl(job->url, job->scope.model, job->gemini) ||
-      !buildRequest(job->batch, job->gemini, job->scope.model, reinterpret_cast<char*>(job->body.get()), MAX_BATCH_BODY,
-                    job->bodyBytes) ||
-      !job->response.data || !job->framer || !trustedtime::trustedNow()) {
+  const bool endpointReady = buildUrl(job->url, job->scope.model, job->gemini);
+  bool requestReady = endpointReady &&
+                      buildRequest(job->batch, job->gemini, job->scope.model,
+                                   reinterpret_cast<char*>(job->body.get()), MAX_BATCH_BODY, job->bodyBytes);
+  while (!requestReady && job->batch.size() > 1 && endpointReady) {
+    // A long paragraph may exceed the fixed request cap. Preserve FIFO
+    // priority and split into smaller packets rather than dropping the entire
+    // 100-sentence lookahead window.
+    batch_.insert(batch_.begin(), std::move(job->batch.back()));
+    job->batch.pop_back();
+    requestReady = buildRequest(job->batch, job->gemini, job->scope.model,
+                                reinterpret_cast<char*>(job->body.get()), MAX_BATCH_BODY, job->bodyBytes);
+  }
+  if (!requestReady || !job->response.data || !job->framer || !trustedtime::trustedNow()) {
     // Do not reapply the 94 KiB preflight AFTER allocating JSON and response
     // buffers. TLS gets its own contiguous-block check just below.
     LOG_INF("AI_PRE", "Batch skipped: endpoint, clock, parser or bounded PSRAM buffers");
     disabled_ = true;
     return false;
   }
+  job->checkpoint.nextOffset = job->batch.back().end;
   const auto heap = HalMemory::getInternalHeap();
   if (heap.freeBytes < 48 * 1024 || heap.largestBlockBytes < 20 * 1024) {
     LOG_INF("AI_PRE", "Batch TLS reserve low: free=%u block=%u", static_cast<unsigned>(heap.freeBytes),
