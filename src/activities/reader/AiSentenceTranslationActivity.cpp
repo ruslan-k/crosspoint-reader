@@ -336,6 +336,7 @@ void AiSentenceTranslationActivity::onEnter() {
   std::string cachedWord, cachedSentence;
   if (ai_translation_cache::load(bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel(), word_,
                                  sentence_, cachedWord, cachedSentence)) {
+    LOG_INF("AI_CACHE", "Exact translation cache hit");
     openResult(std::move(cachedWord), std::move(cachedSentence));
     return;
   }
@@ -351,6 +352,7 @@ void AiSentenceTranslationActivity::onEnter() {
     needle.end = UINT32_MAX;
     needle.source = sentence_;
     if (ai_prefetch::lookup(scope, needle, origin_.selectedWordOffset, word_, cachedWord, cachedSentence)) {
+      LOG_INF("AI_CACHE", "Prefetched translation cache hit");
       openResult(std::move(cachedWord), std::move(cachedSentence));
       return;
     }
@@ -710,8 +712,10 @@ void AiSentenceTranslationActivity::loop() {
     // Save only validated provider output; failed/partial results never enter the cache.
     // This happens after queuing the popup render, so the first result is not
     // delayed by filesystem housekeeping.
-    ai_translation_cache::save(bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel(), word_,
-                               sentence_, wordTranslation_, sentenceTranslation_);
+    const bool cached = ai_translation_cache::save(bookPath_, AI_TRANSLATION_STORE.getUrl(),
+                                                   AI_TRANSLATION_STORE.getModel(), word_, sentence_,
+                                                   wordTranslation_, sentenceTranslation_);
+    LOG_INF("AI_CACHE", "Foreground translation cache save: %s", cached ? "ok" : "skipped");
   } else if (retryPending_) {
     // No loops inside the network stack and no retry for errors other than a
     // provider-confirmed output-token limit. A failed retry is final.

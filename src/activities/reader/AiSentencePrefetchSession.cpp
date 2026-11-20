@@ -12,8 +12,6 @@
 #include <esp_heap_caps.h>
 #include <esp_http_client.h>
 #include <esp_random.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 
 #include <algorithm>
 #include <atomic>
@@ -21,7 +19,6 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
-#include <new>
 #include <string>
 #include <utility>
 #include <vector>
@@ -37,18 +34,16 @@ namespace {
 
 constexpr size_t MAX_BATCH_BODY = 24 * 1024;
 constexpr size_t MAX_RESPONSE = 48 * 1024;
-constexpr int HTTP_TIMEOUT_MS = 30000;
-constexpr uint32_t MIN_INTERNAL_FREE = 120 * 1024;
-constexpr uint32_t MIN_INTERNAL_BLOCK = 44 * 1024;
+constexpr int HTTP_TIMEOUT_MS = 60000;
+constexpr int HTTP_STEP_TIMEOUT_MS = 100;
+constexpr uint32_t MIN_INTERNAL_IN_FLIGHT = 15 * 1024;
+// Cooperative client uses the existing Translate task stack, unlike the old worker.
+constexpr uint32_t MIN_INTERNAL_FREE = 94 * 1024;
+constexpr uint32_t MIN_INTERNAL_BLOCK = 36 * 1024;
 constexpr uint32_t MIN_PSRAM_FREE = 144 * 1024;
 constexpr uint32_t MIN_PSRAM_BLOCK = 64 * 1024;
-constexpr uint32_t PREFETCH_STACK = 12288;
 constexpr size_t TOKENS_PER_TICK = 48;
 constexpr size_t MAX_PAGE_TOKENS = 320;
-
-// A prior popup may close while its HTTPS task is finishing. Never allow a
-// second popup to start another request until that worker releases TLS.
-std::atomic<bool> gPrefetchHttpBusy{false};
 
 // Never compete with the reader for its last heap blocks. TLS needs internal
 // buffers even when JSON and the HTTP body are backed by Picco PSRAM.
@@ -245,103 +240,62 @@ size_t processResponse(const std::string& raw, const ai_prefetch::Scope& scope,
 
 }  // namespace
 
+// One nonblocking HTTPS step per Translate UI loop. No extra FreeRTOS stack.
 struct AiSentencePrefetchSession::Job {
   ai_prefetch::Scope scope;
   ai_prefetch::Checkpoint checkpoint;
   std::vector<ai_prefetch::Sentence> batch;
-  std::string apiKey;
+  std::string url;
+  std::string body;
+  std::string auth;
+  bool gemini = false;
   std::atomic<bool> cancel{false};
-  std::atomic<bool> done{false};
-  bool success = false;
+  Response response{&cancel};
+  esp_http_client_handle_t client = nullptr;
+  uint32_t startedAt = 0;
+  ~Job() {
+    if (client) esp_http_client_cleanup(client);
+  }
 };
 
-namespace {
-void batchTask(void* argument) {
-  std::unique_ptr<std::shared_ptr<AiSentencePrefetchSession::Job>> owner(
-      static_cast<std::shared_ptr<AiSentencePrefetchSession::Job>*>(argument));
-  auto job = std::move(*owner);
-  owner.reset();
-  auto perform = [&]() -> bool {
-    if (job->cancel.load() || !memoryReady() || !trustedtime::trustedNow()) return false;
-    bool gemini = false;
-    std::string url = job->scope.url;
-    if (!buildUrl(url, job->scope.model, gemini)) return false;
-    std::string body;
-    if (!buildRequest(job->batch, gemini, job->scope.model, body)) return false;
-    Response response(&job->cancel);
-    if (!response.data) return false;
-
-    esp_http_client_config_t cfg{};
-    cfg.url = url.c_str();
-    cfg.method = HTTP_METHOD_POST;
-    // Non-blocking HTTPS allows the modal to cancel without another task
-    // closing a live client handle (which is not thread-safe).
-    cfg.timeout_ms = 1000;
-    cfg.is_async = true;
-    cfg.cert_pem = ai_translation::ROOTS;
-    cfg.skip_cert_common_name_check = false;
-    cfg.disable_auto_redirect = true;
-    cfg.event_handler = onHttpEvent;
-    cfg.user_data = &response;
-    cfg.buffer_size = 2048;
-    cfg.buffer_size_tx = 2048;
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (!client) return false;
-
-    esp_err_t setup = esp_http_client_set_header(client, "Content-Type", "application/json");
-    if (setup == ESP_OK) setup = esp_http_client_set_header(client, "User-Agent", "CrossPoint-AI-Prefetch");
-    std::string auth;
-    if (setup == ESP_OK && gemini) {
-      setup = esp_http_client_set_header(client, "x-goog-api-key", job->apiKey.c_str());
-    } else if (setup == ESP_OK) {
-      auth = "Bearer " + job->apiKey;
-      setup = esp_http_client_set_header(client, "Authorization", auth.c_str());
-    }
-    char session[40] = {};
-    if (setup == ESP_OK && ai_endpoint::isOpenCodeGoUrl(url)) {
-      snprintf(session, sizeof(session), "cp-%08x%08x%08x%08x", static_cast<unsigned>(esp_random()),
-               static_cast<unsigned>(esp_random()), static_cast<unsigned>(esp_random()),
-               static_cast<unsigned>(esp_random()));
-      setup = esp_http_client_set_header(client, "x-opencode-session", session);
-    }
-    if (setup == ESP_OK) setup = esp_http_client_set_post_field(client, body.data(), static_cast<int>(body.size()));
-    if (job->cancel.load()) setup = ESP_FAIL;
-    esp_err_t result = setup;
-    if (setup == ESP_OK) {
-      const uint32_t started = millis();
-      do {
-        if (job->cancel.load(std::memory_order_relaxed) ||
-            static_cast<uint32_t>(millis() - started) >= HTTP_TIMEOUT_MS) {
-          result = ESP_FAIL;
-          break;
-        }
-        result = esp_http_client_perform(client);
-        if (result == ESP_ERR_HTTP_EAGAIN) vTaskDelay(pdMS_TO_TICKS(25));
-      } while (result == ESP_ERR_HTTP_EAGAIN);
-    }
-    const int status = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
-    if (result != ESP_OK || response.overflow || status != 200 || job->cancel.load()) {
-      LOG_INF("AI_PRE", "Batch skipped: HTTP status=%d transport=%d", status, static_cast<int>(result));
-      return false;
-    }
-    const std::string output = getOutput(response, gemini);
-    if (output.empty() || job->cancel.load() || !memoryReady()) return false;
-    const size_t saved = processResponse(output, job->scope, job->batch, job->cancel);
-    if (job->cancel.load()) return false;
-    // Hints are advisory; the scanner still validates EVERY record on resume.
-    if (saved != 0) ai_prefetch::saveCheckpoint(job->scope, job->checkpoint);
-    LOG_INF("AI_PRE", "Batch stored %u/%u sentences", static_cast<unsigned>(saved),
-            static_cast<unsigned>(job->batch.size()));
-    return saved == job->batch.size();
-  };
-  job->success = perform();
-  job->done.store(true, std::memory_order_release);
-  job.reset();
-  gPrefetchHttpBusy.store(false, std::memory_order_release);
-  vTaskDelete(nullptr);
+void AiSentencePrefetchSession::pollBatch() {
+  if (!worker_) return;
+  Job& job = *worker_;
+  const auto mem = HalMemory::getInternalHeap();
+  if (WiFi.status() != WL_CONNECTED || static_cast<uint32_t>(millis() - job.startedAt) >= HTTP_TIMEOUT_MS ||
+      mem.freeBytes < MIN_INTERNAL_IN_FLIGHT) {
+    LOG_INF("AI_PRE", "Cancelled batch: timeout, Wi-Fi or low memory (free=%u)", static_cast<unsigned>(mem.freeBytes));
+    worker_.reset();
+    disabled_ = true;
+    return;
+  }
+  const esp_err_t result = esp_http_client_perform(job.client);
+  if (result == ESP_ERR_HTTP_EAGAIN) return;
+  const int status = esp_http_client_get_status_code(job.client);
+  esp_http_client_cleanup(job.client);  // Free TLS before JSON and SD I/O.
+  job.client = nullptr;
+  if (result != ESP_OK || status != 200 || job.response.overflow) {
+    LOG_INF("AI_PRE", "Batch failed: status=%d transport=%d overflow=%d", status,
+            static_cast<int>(result), job.response.overflow);
+    worker_.reset();
+    disabled_ = true;
+    return;
+  }
+  const std::string output = getOutput(job.response, job.gemini);
+  if (output.empty()) {
+    LOG_INF("AI_PRE", "Batch rejected: empty or unsupported provider response");
+    worker_.reset();
+    disabled_ = true;
+    return;
+  }
+  const size_t saved = processResponse(output, job.scope, job.batch, job.cancel);
+  if (saved > 0) ai_prefetch::saveCheckpoint(job.scope, job.checkpoint);
+  LOG_INF("AI_PRE", "Batch stored %u/%u sentences", static_cast<unsigned>(saved),
+          static_cast<unsigned>(job.batch.size()));
+  const bool complete = saved == job.batch.size();
+  worker_.reset();
+  if (!complete) disabled_ = true;
 }
-}  // namespace
 
 AiSentencePrefetchSession::AiSentencePrefetchSession(ai_prefetch::Scope scope, Section* section, uint32_t spine,
                                                      int firstPage, uint32_t selectedWordOffset)
@@ -358,52 +312,55 @@ AiSentencePrefetchSession::~AiSentencePrefetchSession() { cancel(); }
 
 void AiSentencePrefetchSession::cancel() {
   stopped_ = true;
-  if (worker_) worker_->cancel.store(true, std::memory_order_release);
-  worker_.reset();  // Worker owns a separate shared copy; never dereferences this activity.
+  if (worker_) worker_->cancel.store(true, std::memory_order_relaxed);
+  worker_.reset();  // Disconnect TLS synchronously before reader resumes.
   pageTokens_.clear();
-  page_.reset();
   batch_.clear();
 }
 
 bool AiSentencePrefetchSession::openPage() {
   if (!section_ || nextPage_ >= static_cast<int>(section_->pageCount)) {
-    // Reuse pages already laid out by the reader (including a partial build).
-    // Never call buildSomeMore() or inflate another chapter just for AI.
-    scanEnded_ = true;
+    scanEnded_ = true;  // Never build EPUB pages merely for AI.
     return false;
   }
-  const auto mem = HalMemory::getInternalHeap();
-  if (mem.freeBytes < MIN_INTERNAL_FREE || mem.largestBlockBytes < MIN_INTERNAL_BLOCK) return false;
+  if (!memoryReady()) return false;
   RenderLock lock(RenderLock::Mode::Try);
   if (!lock.ownsLock()) return false;
-  page_ = section_->loadPage(nextPage_);
-  ++nextPage_;
-  if (!page_) {
+  auto page = section_->loadPage(nextPage_);
+  if (!page) {
     scanEnded_ = true;
     return false;
   }
+  ++nextPage_;
   pageTokens_.clear();
-  for (const auto& element : page_->elements) {
+  for (const auto& element : page->elements) {
     if (element->getTag() != TAG_PageLine) continue;
     const auto* block = static_cast<const PageLine&>(*element).getBlock();
     if (!block || !block->valid()) continue;
     for (uint16_t i = 0; i < block->wordCount(); ++i) {
-      const auto r = block->wordSourceRange(i);
-      if (r.start == UINT32_MAX || r.end == UINT32_MAX || r.end <= r.start ||
-          !clippingText::hasVisibleText(block->wordText(i)))
-        continue;
+      const auto range = block->wordSourceRange(i);
+      const char* word = block->wordText(i);
+      if (range.start == UINT32_MAX || range.end == UINT32_MAX || range.end <= range.start ||
+          !clippingText::hasVisibleText(word)) continue;
       if (pageTokens_.size() >= MAX_PAGE_TOKENS) {
         disabled_ = true;
-        page_.reset();
         pageTokens_.clear();
+        LOG_INF("AI_PRE", "Page token cap reached; prefetch paused");
         return false;
       }
-      pageTokens_.push_back({block, i, r.start, r.end, block->wordStartsParagraph(i)});
+      Token token;
+      token.text = word;
+      token.start = range.start;
+      token.end = range.end;
+      token.paragraph = block->wordStartsParagraph(i);
+      token.discretionaryHyphen = block->wordHasDiscretionaryHyphen(i);
+      pageTokens_.push_back(std::move(token));
     }
   }
   std::stable_sort(pageTokens_.begin(), pageTokens_.end(),
-                   [](const Token& a, const Token& b) { return a.start < b.start; });
+                   [](const Token& lhs, const Token& rhs) { return lhs.start < rhs.start; });
   tokenIndex_ = 0;
+  // The Page is released immediately, before any HTTPS request.
   return true;
 }
 
@@ -426,8 +383,7 @@ void AiSentencePrefetchSession::completeSentence() {
 }
 
 void AiSentencePrefetchSession::acceptToken(const Token& token) {
-  const char* raw = token.block->wordText(token.index);
-  if (!raw) return;
+  const char* raw = token.text.c_str();
   const char* clean = raw;
   if (clippingText::hasEmSpacePrefix(clean)) clean += 3;
   while (*clean == ' ' || *clean == '\t' || *clean == '\n' || *clean == '\r' ||
@@ -443,7 +399,7 @@ void AiSentencePrefetchSession::acceptToken(const Token& token) {
   current_.end = token.end;
   const char separator = !current_.source.empty() && token.start > lastWordEnd_ ? ' ' : '\0';
   if (!clippingText::append(current_.source, clean, separator, ai_prefetch::MAX_SENTENCE_BYTES,
-                            token.block->wordHasDiscretionaryHyphen(token.index))) {
+                            token.discretionaryHyphen)) {
     droppedSentence_ = true;
   }
   if (current_.words.size() >= ai_prefetch::MAX_WORDS || strlen(clean) > 160) {
@@ -465,71 +421,110 @@ void AiSentencePrefetchSession::finishScan() {
 
 bool AiSentencePrefetchSession::launchBatch() {
   if (batch_.empty() || !memoryReady()) return false;
-  bool idle = false;
-  if (!gPrefetchHttpBusy.compare_exchange_strong(idle, true, std::memory_order_acq_rel)) return false;
-  auto job = std::make_shared<Job>();
+  auto job = std::make_unique<Job>();
   job->scope = scope_;
   job->batch = std::move(batch_);
-  job->apiKey = AI_TRANSLATION_STORE.getKey();
   job->checkpoint = {spine_, anchor_, job->batch.back().end, considered_};
   batch_.clear();
   batch_.reserve(ai_prefetch::BATCH_SENTENCES);
-  auto* holder = new (std::nothrow) std::shared_ptr<Job>(job);
-  if (!holder) {
-    gPrefetchHttpBusy.store(false, std::memory_order_release);
-    return false;
-  }
-  TaskHandle_t task = nullptr;
-#if defined(configNUM_CORES) && configNUM_CORES > 1
-  constexpr BaseType_t core = 0;
-#else
-  constexpr BaseType_t core = 0;
-#endif
-  const BaseType_t ok =
-      xTaskCreatePinnedToCore(batchTask, "AiPrefetch", PREFETCH_STACK, holder, tskIDLE_PRIORITY + 1, &task, core);
-  if (ok != pdPASS) {
-    delete holder;
-    LOG_INF("AI_PRE", "Skipping batch: low memory for task stack");
+  job->url = job->scope.url;
+  if (!buildUrl(job->url, job->scope.model, job->gemini) ||
+      !buildRequest(job->batch, job->gemini, job->scope.model, job->body) || !job->response.data ||
+      !memoryReady() || !trustedtime::trustedNow()) {
+    LOG_INF("AI_PRE", "Batch skipped: bad endpoint, clock or low RAM");
     disabled_ = true;
-    gPrefetchHttpBusy.store(false, std::memory_order_release);
     return false;
   }
+  esp_http_client_config_t cfg{};
+  cfg.url = job->url.c_str();
+  cfg.method = HTTP_METHOD_POST;
+  cfg.is_async = true;
+  cfg.timeout_ms = HTTP_STEP_TIMEOUT_MS;
+  cfg.cert_pem = ai_translation::ROOTS;
+  cfg.skip_cert_common_name_check = false;
+  cfg.disable_auto_redirect = true;
+  cfg.event_handler = onHttpEvent;
+  cfg.user_data = &job->response;
+  cfg.buffer_size = 2048;
+  cfg.buffer_size_tx = 2048;
+  job->client = esp_http_client_init(&cfg);
+  if (!job->client) {
+    disabled_ = true;
+    LOG_INF("AI_PRE", "Batch skipped: HTTPS client initialization failed");
+    return false;
+  }
+  esp_err_t result = esp_http_client_set_header(job->client, "Content-Type", "application/json");
+  if (result == ESP_OK) result = esp_http_client_set_header(job->client, "User-Agent", "CrossPoint-AI-Prefetch");
+  if (result == ESP_OK && job->gemini) {
+    result = esp_http_client_set_header(job->client, "x-goog-api-key", AI_TRANSLATION_STORE.getKey().c_str());
+  } else if (result == ESP_OK) {
+    job->auth = "Bearer " + AI_TRANSLATION_STORE.getKey();
+    result = esp_http_client_set_header(job->client, "Authorization", job->auth.c_str());
+  }
+  char session[40] = {};
+  if (result == ESP_OK && ai_endpoint::isOpenCodeGoUrl(job->url)) {
+    snprintf(session, sizeof(session), "cp-%08x%08x%08x%08x", static_cast<unsigned>(esp_random()),
+             static_cast<unsigned>(esp_random()), static_cast<unsigned>(esp_random()),
+             static_cast<unsigned>(esp_random()));
+    result = esp_http_client_set_header(job->client, "x-opencode-session", session);
+  }
+  if (result == ESP_OK) {
+    result = esp_http_client_set_post_field(job->client, job->body.data(), static_cast<int>(job->body.size()));
+  }
+  if (result != ESP_OK) {
+    LOG_INF("AI_PRE", "Batch skipped: HTTPS setup error=%d", static_cast<int>(result));
+    disabled_ = true;
+    return false;
+  }
+  job->startedAt = millis();
+  LOG_INF("AI_PRE", "Batch started: count=%u internal=%u largest=%u",
+          static_cast<unsigned>(job->batch.size()), static_cast<unsigned>(HalMemory::getInternalHeap().freeBytes),
+          static_cast<unsigned>(HalMemory::getInternalHeap().largestBlockBytes));
   worker_ = std::move(job);
   return true;
 }
 
 void AiSentencePrefetchSession::tick() {
-  if (stopped_ || disabled_ || !section_ || WiFi.status() != WL_CONNECTED) return;
+  if (stopped_ || disabled_ || !section_) return;
   if (worker_) {
-    if (!worker_->done.load(std::memory_order_acquire)) return;
-    const bool success = worker_->success;
-    worker_.reset();
-    if (!success) {
-      disabled_ = true;  // No retry storm; resume on a later Translate popup.
-      return;
-    }
+    pollBatch();  // At most one bounded asynchronous HTTPS step per UI tick.
+    return;
   }
-  if (!memoryReady()) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (!memoryReady()) {
+    if (!reportedMemoryPause_) {
+      const auto mem = HalMemory::getInternalHeap();
+      LOG_INF("AI_PRE", "Waiting for RAM: free=%u largest=%u need=%u/%u",
+              static_cast<unsigned>(mem.freeBytes), static_cast<unsigned>(mem.largestBlockBytes),
+              static_cast<unsigned>(MIN_INTERNAL_FREE), static_cast<unsigned>(MIN_INTERNAL_BLOCK));
+      reportedMemoryPause_ = true;
+    }
+    return;
+  }
+  reportedMemoryPause_ = false;
   if (scanEnded_ || considered_ >= ai_prefetch::WINDOW_SENTENCES) {
     finishScan();
     if (!batch_.empty()) launchBatch();
     return;
   }
-  // Do at most one page read or 48 token visits per loop tick.
-  if (!page_ && !openPage()) {
-    if (scanEnded_) finishScan();
-    if (scanEnded_ && !batch_.empty()) launchBatch();
-    return;
+  if (tokenIndex_ >= pageTokens_.size()) {
+    pageTokens_.clear();
+    if (!openPage()) {
+      if (scanEnded_) finishScan();
+      if (scanEnded_ && !batch_.empty()) launchBatch();
+      return;
+    }
   }
   size_t stepped = 0;
-  while (page_ && tokenIndex_ < pageTokens_.size() && stepped++ < TOKENS_PER_TICK &&
-         batch_.size() < ai_prefetch::BATCH_SENTENCES && considered_ < ai_prefetch::WINDOW_SENTENCES) {
-    const Token token = pageTokens_[tokenIndex_++];
+  while (tokenIndex_ < pageTokens_.size() && stepped++ < TOKENS_PER_TICK &&
+         batch_.size() < ai_prefetch::BATCH_SENTENCES &&
+         considered_ < ai_prefetch::WINDOW_SENTENCES) {
+    const Token& token = pageTokens_[tokenIndex_++];
     acceptToken(token);
   }
   if (tokenIndex_ >= pageTokens_.size()) {
     pageTokens_.clear();
-    page_.reset();
+    tokenIndex_ = 0;
   }
   if (batch_.size() == ai_prefetch::BATCH_SENTENCES) launchBatch();
 }

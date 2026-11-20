@@ -14,8 +14,8 @@ class Section;
 class TextBlock;
 
 // Used only while the modal Translate activity is on screen. EPUB extraction
-// happens in short main-loop ticks, while HTTPS runs in ONE isolated worker
-// with immutable copies. The worker never touches Activity, Section or renderer.
+// happens in short main-loop ticks; async HTTPS uses Translate's existing
+// task stack, not a second FreeRTOS worker.
 class AiSentencePrefetchSession {
  public:
   AiSentencePrefetchSession(ai_prefetch::Scope scope, Section* section, uint32_t spine, int firstPage,
@@ -25,21 +25,22 @@ class AiSentencePrefetchSession {
   void tick();
   void cancel();
 
-  struct Job;  // Worker owns copies; no pointers to activity or EPUB section.
+  struct Job;  // Owns the HTTPS handle and request/response buffers.
 
  private:
   struct Token {
-    const TextBlock* block = nullptr;  // Borrowed only while page_ is alive.
-    uint16_t index = 0;
+    std::string text;  // Copy text before releasing Page.
     uint32_t start = 0;
     uint32_t end = 0;
     bool paragraph = false;
+    bool discretionaryHyphen = false;
   };
   bool openPage();
   void acceptToken(const Token& token);
   void completeSentence();
   void finishScan();
   bool launchBatch();
+  void pollBatch();
 
   ai_prefetch::Scope scope_;
   Section* section_ = nullptr;
@@ -52,10 +53,10 @@ class AiSentencePrefetchSession {
   bool disabled_ = false;
   bool droppedSentence_ = false;
   bool stopped_ = false;
-  std::unique_ptr<Page> page_;
+  bool reportedMemoryPause_ = false;
   std::vector<Token> pageTokens_;
   size_t tokenIndex_ = 0;
   ai_prefetch::Sentence current_;
   std::vector<ai_prefetch::Sentence> batch_;
-  std::shared_ptr<Job> worker_;
+  std::unique_ptr<Job> worker_;
 };
