@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Source contract for Picco's cooperative Translate-only prefetch loop.
+"""Source contract for Picco's popup-owned HTTPS prefetch worker.
 
 Hardware networking and power-loss behavior still require real Picco tests.
 """
@@ -14,7 +14,7 @@ cache = (root / "src/util/AiPrefetchCache.cpp").read_text()
 assert "MIN_INTERNAL_FREE = 94 * 1024" in prefetch
 assert "MIN_INTERNAL_BLOCK = 36 * 1024" in prefetch
 assert "MIN_INTERNAL_IN_FLIGHT = 15 * 1024" in prefetch
-assert "HTTP_READ_IDLE_TIMEOUT_MS = 30000" in prefetch
+assert "HTTP_READ_IDLE_TIMEOUT_MS = 6000" in prefetch
 assert "cfg.timeout_ms = HTTP_READ_IDLE_TIMEOUT_MS;" in prefetch
 assert "HTTP_STEP_TIMEOUT_MS = 100" not in prefetch
 assert "ESP_ERR_HTTP_INCOMPLETE_DATA" in prefetch
@@ -33,9 +33,15 @@ assert "esp_http_client_cleanup(job.client)" in prefetch
 assert "auto page = section_->loadPage(nextPage_)" in prefetch
 assert "token.text = word;" in prefetch
 assert "reportedMemoryPause_" in header
-assert "std::unique_ptr<Job> worker_" in header
-assert "std::shared_ptr<Job> worker_" not in header
-for banned in ("xTaskCreate", "vTaskDelete", "gPrefetchHttpBusy", "page_ = section_->loadPage"):
+assert "std::shared_ptr<Job> worker_" in header
+assert "xTaskCreateWithCaps(" in prefetch
+assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in prefetch
+assert "vTaskDeleteWithCaps(nullptr)" in prefetch
+assert "std::atomic<bool> gPrefetchTaskBusy" in prefetch
+assert "worker_->cancel.store(true, std::memory_order_release)" in prefetch
+assert "void AiSentencePrefetchSession::runBatch(void* data)" in prefetch
+assert "std::atomic<bool> done{false}" in prefetch
+for banned in ("gPrefetchHttpBusy", "page_ = section_->loadPage"):
     assert banned not in prefetch, banned
 assert "ai_prefetch::WINDOW_SENTENCES" in prefetch
 assert "ai_prefetch::BATCH_SENTENCES" in prefetch
@@ -49,9 +55,10 @@ assert "Prefetched translation cache hit" in activity
 assert "Storage.exists(path.c_str())" in cache
 assert "StreamFramer" in prefetch
 assert "saveItem(item, job.scope, job.batch, job.stored)" in prefetch
-assert "flushDeferred();" in prefetch
+assert "completedObjects" in prefetch and "recognizedItems" in prefetch
+assert "flushDeferred(job);" in prefetch
 assert "request[\"stream\"]" not in prefetch  # fixed-buffer PSRAM writer, not ArduinoJson docs
 assert "text/event-stream" in prefetch and "max_tokens" in prefetch
 assert "BoundedJsonWriter" in prefetch
 assert "HalMemory::allocatePsram(MAX_BATCH_BODY)" in prefetch
-print("Picco cooperative prefetch source guards passed")
+print("Picco PSRAM worker prefetch source guards passed")

@@ -199,8 +199,12 @@ The new implementation uses:
   requests. A corrupt or missing record is scanned again; the checkpoint is
   advisory and never suppresses a missing record.
 - A fixed-capacity JSON writer builds input directly in PSRAM, with no large
-  temporary request documents/strings on the internal heap. HTTPS remains
-  cooperative inside Translate; there is at most one in-flight request.
+  temporary request documents/strings on the internal heap. HTTPS now runs
+  in one low-priority task using a 12-KiB PSRAM stack rather than blocking
+  Translate's UI loop. A global guard prevents overlapping network requests
+  even if Translate closes and reopens. On close, network cancellation is
+  signalled immediately; the detached task may need up to its bounded socket
+  timeout to notice cancellation. No new work is scheduled after closing.
 - If internal RAM is too low to persist a streamed record while TLS is alive,
   keep the finished JSON record temporarily in PSRAM and write it after
   disconnecting TLS, including when Translate closes. Incomplete stream
@@ -359,3 +363,17 @@ verification, low-memory error handling, provider-specific responses, and
 returning to the exact reader page after closing the translation.
 
 No API keys or book excerpts are committed to the repository.
+
+### Picco prefetch worker after serial-log 8 (2026-11-21)
+
+The previous async HTTP client blocked the Translate UI for 12–32 seconds
+per esp_http_client_perform call. A single bounded FreeRTOS worker now runs
+TLS with a PSRAM-allocated stack via xTaskCreateWithCaps. The UI loop only
+checks an atomic completion flag; no TLS or SD calls run in the page-turn path.
+Network idle timeout is now 6 seconds, and overall request lifetime is at
+most 60 seconds. The worker's shared job is safe after the popup is destroyed,
+and is cancelled when Translate closes. New log counts completed JSON objects,
+recognized model item IDs, and rejected objects to distinguish a malformed
+model response from a network failure. Output budget is 2048 tokens rather
+than 6144 to reduce excessive streamed data. Only an on-device test can
+confirm the currently selected model produces valid NDJSON before exit.
