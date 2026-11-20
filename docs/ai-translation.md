@@ -161,6 +161,20 @@ The previous all-or-nothing four-sentence prefetch repeatedly logged
 foreground translation succeeded. It duplicated JSON prompts in internal RAM
 and refused a valid sentence if *any* contextual word was missing.
 
+**Picco transport fix (serial-log 7, 2026-11-21).**
+The ESP32-S3 async HTTP client was configured with a 100-ms read-idle
+timeout. This is a socket timeout, not a harmless per-tick budget: a
+pause between SSE chunks can make esp_http_client_perform return
+ESP_ERR_HTTP_INCOMPLETE_DATA (0x700c / 28684), exactly as shown in the
+device trace, with Stream stored 0/4 on every attempt.
+The socket read-idle timeout is now 30 seconds, while the overall batch
+lifetime remains 60 seconds. A longer socket timeout may delay Translate
+UI input while a transport call is waiting, but never affects page turns.
+If a 200-status SSE request still ends incomplete without any cached
+items, later packets for that endpoint use ordinary non-streaming JSON
+for the rest of this boot, without immediate paid retries.
+New diagnostics report mode=sse/json and frame/part counts, never book text.
+
 The new implementation uses:
 - **100-sentence lookahead**, sorted by source offset, with the **nearest four
   missing/partial sentences** requested first.

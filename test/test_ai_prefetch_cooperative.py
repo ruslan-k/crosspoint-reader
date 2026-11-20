@@ -14,7 +14,13 @@ cache = (root / "src/util/AiPrefetchCache.cpp").read_text()
 assert "MIN_INTERNAL_FREE = 94 * 1024" in prefetch
 assert "MIN_INTERNAL_BLOCK = 36 * 1024" in prefetch
 assert "MIN_INTERNAL_IN_FLIGHT = 15 * 1024" in prefetch
-assert "HTTP_STEP_TIMEOUT_MS = 100" in prefetch
+assert "HTTP_READ_IDLE_TIMEOUT_MS = 30000" in prefetch
+assert "cfg.timeout_ms = HTTP_READ_IDLE_TIMEOUT_MS;" in prefetch
+assert "HTTP_STEP_TIMEOUT_MS = 100" not in prefetch
+assert "ESP_ERR_HTTP_INCOMPLETE_DATA" in prefetch
+assert "gNonStreamingEndpoint = job.scope.url;" in prefetch
+assert "job->streaming = job->scope.url != gNonStreamingEndpoint" in prefetch
+assert "job->streaming ? \"text/event-stream\" : \"application/json\"" in prefetch
 assert "HTTP_TIMEOUT_MS = 60000" in prefetch
 assert "cfg.is_async = true;" in prefetch
 assert "esp_http_client_perform(job.client)" in prefetch
