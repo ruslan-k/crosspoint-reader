@@ -95,7 +95,8 @@ std::string filePath(uint64_t scopeHash, uint64_t keyHash) {
 
 bool safeSentence(const Sentence& s, bool requireTranslation) {
   if (s.source.empty() || s.source.size() > MAX_SENTENCE_BYTES || s.words.size() > MAX_WORDS) return false;
-  if (requireTranslation && (s.translation.empty() || s.translation.size() > MAX_TRANSLATION)) return false;
+  if (requireTranslation && ((s.translation.empty() && s.words.empty()) || s.translation.size() > MAX_TRANSLATION))
+    return false;
   if (!requireTranslation) return true;
   uint32_t previousOffset = 0;
   bool first = true;
@@ -135,7 +136,8 @@ bool readRecord(const Scope& scope, const Sentence& needle, Sentence& loaded) {
   Header header{};
   bool ok = file.read(&header, sizeof(header)) == sizeof(header) && header.magic == RECORD_MAGIC &&
             header.scopeHash == scopeHash && header.keyHash == keyHash && header.spine == needle.spine &&
-            header.offset == needle.start && header.sourceBytes == needle.source.size() && header.translatedBytes > 0 &&
+            header.offset == needle.start && header.sourceBytes == needle.source.size() &&
+            (header.translatedBytes > 0 || header.wordCount > 0) &&
             header.translatedBytes <= MAX_TRANSLATION && header.wordCount <= MAX_WORDS &&
             file.fileSize() <= sizeof(header) + MAX_SENTENCE_BYTES + MAX_TRANSLATION +
                                    MAX_WORDS * (sizeof(WordHeader) + MAX_WORD_BYTES + MAX_WORD_TRANSLATION);
@@ -176,6 +178,31 @@ bool has(const Scope& scope, const Sentence& sentence) {
   return readRecord(scope, sentence, loaded);
 }
 
+bool pending(const Scope& scope, const Sentence& fullSentence, Sentence& delta) {
+  if (!safeSentence(fullSentence, false)) return false;
+  delta = fullSentence;
+  delta.translation.clear();
+  Sentence stored;
+  if (readRecord(scope, fullSentence, stored)) {
+    delta.translation = stored.translation;
+    delta.words.clear();
+    for (const Word& expected : fullSentence.words) {
+      const auto translated = std::find_if(stored.words.begin(), stored.words.end(), [&](const Word& saved) {
+        return saved.offset == expected.offset && saved.source == expected.source && !saved.translation.empty();
+      });
+      if (translated == stored.words.end()) {
+        Word missing = expected;
+        missing.translation.clear();
+        delta.words.push_back(std::move(missing));
+      }
+    }
+  } else {
+    for (Word& word : delta.words) word.translation.clear();
+  }
+  // Complete sentence and full word map are already durable.
+  return delta.translation.empty() || !delta.words.empty();
+}
+
 bool lookup(const Scope& scope, const Sentence& sentence, uint32_t selectedOffset, std::string_view selectedWord,
             std::string& translatedWord, std::string& translatedSentence) {
   Sentence loaded;
@@ -183,51 +210,77 @@ bool lookup(const Scope& scope, const Sentence& sentence, uint32_t selectedOffse
   const auto word = std::find_if(loaded.words.begin(), loaded.words.end(), [&](const Word& item) {
     return item.offset == selectedOffset && item.source == selectedWord;
   });
-  if (word == loaded.words.end()) return false;  // Never invent a word mapping.
+  if (word == loaded.words.end() || loaded.translation.empty() || word->translation.empty())
+    return false;  // Never invent a word mapping or a missing sentence translation.
   translatedWord = word->translation;
   translatedSentence = loaded.translation;
   return true;
 }
 
-bool save(const Scope& scope, const Sentence& s) {
-  if (!safeSentence(s, true)) return false;
+bool save(const Scope& scope, const Sentence& update) {
+  if (!safeSentence(update, true)) return false;
   const auto internal = HalMemory::getInternalHeap();
-  if (internal.freeBytes < 48 * 1024 || internal.largestBlockBytes < 20 * 1024) return false;
+  if (internal.freeBytes < 26 * 1024 || internal.largestBlockBytes < 12 * 1024) return false;
+
+  // Merge with a validated prior record. In particular a partial streamed
+  // reply cannot overwrite a complete word map or erase an earlier sentence.
+  Sentence record;
+  if (!readRecord(scope, update, record)) {
+    record = update;
+  } else {
+    if (!update.translation.empty()) record.translation = update.translation;
+    for (const Word& word : update.words) {
+      auto found = std::find_if(record.words.begin(), record.words.end(), [&](const Word& old) {
+        return old.offset == word.offset && old.source == word.source;
+      });
+      if (found == record.words.end()) {
+        record.words.push_back(word);
+      } else {
+        found->translation = word.translation;
+      }
+    }
+    record.end = update.end;
+    std::sort(record.words.begin(), record.words.end(),
+              [](const Word& lhs, const Word& rhs) { return lhs.offset < rhs.offset; });
+  }
+  if (!safeSentence(record, true)) return false;
   const uint64_t scopeHash = hashScope(scope);
-  const uint64_t keyHash = hashKey(scopeHash, s);
+  const uint64_t keyHash = hashKey(scopeHash, record);
   const std::string dir = directory(scopeHash);
   if (!Storage.ensureDirectoryExists(ROOT) || !Storage.ensureDirectoryExists(dir.c_str())) return false;
   const std::string dest = filePath(scopeHash, keyHash);
   const std::string temp = dest + ".tmp";
 
   Header header{RECORD_MAGIC,
-                s.spine,
-                s.start,
-                static_cast<uint32_t>(s.source.size()),
-                static_cast<uint32_t>(s.translation.size()),
-                static_cast<uint32_t>(s.words.size()),
+                record.spine,
+                record.start,
+                static_cast<uint32_t>(record.source.size()),
+                static_cast<uint32_t>(record.translation.size()),
+                static_cast<uint32_t>(record.words.size()),
                 scopeHash,
                 keyHash,
                 0};
-  uint64_t checksum = hashBytes(HASH_SEED, s.source.data(), s.source.size());
-  checksum = hashBytes(checksum, s.translation.data(), s.translation.size());
-  for (const Word& w : s.words) {
-    const WordHeader wh{w.offset, static_cast<uint16_t>(w.source.size()), static_cast<uint16_t>(w.translation.size())};
+  uint64_t checksum = hashBytes(HASH_SEED, record.source.data(), record.source.size());
+  checksum = hashBytes(checksum, record.translation.data(), record.translation.size());
+  for (const Word& word : record.words) {
+    const WordHeader wh{word.offset, static_cast<uint16_t>(word.source.size()),
+                        static_cast<uint16_t>(word.translation.size())};
     checksum = hashBytes(checksum, &wh, sizeof(wh));
-    checksum = hashBytes(checksum, w.source.data(), w.source.size());
-    checksum = hashBytes(checksum, w.translation.data(), w.translation.size());
+    checksum = hashBytes(checksum, word.source.data(), word.source.size());
+    checksum = hashBytes(checksum, word.translation.data(), word.translation.size());
   }
   header.payloadHash = checksum;
 
   HalFile file;
   if (!Storage.openFileForWrite("AI_PRE", temp, file)) return false;
-  bool ok = file.write(&header, sizeof(header)) == sizeof(header) && writePart(file, s.source) &&
-            writePart(file, s.translation);
-  for (const Word& word : s.words) {
+  bool ok = file.write(&header, sizeof(header)) == sizeof(header) && writePart(file, record.source) &&
+            writePart(file, record.translation);
+  for (const Word& word : record.words) {
     if (!ok) break;
     const WordHeader wh{word.offset, static_cast<uint16_t>(word.source.size()),
                         static_cast<uint16_t>(word.translation.size())};
-    ok = file.write(&wh, sizeof(wh)) == sizeof(wh) && writePart(file, word.source) && writePart(file, word.translation);
+    ok = file.write(&wh, sizeof(wh)) == sizeof(wh) && writePart(file, word.source) &&
+         writePart(file, word.translation);
   }
   if (ok) file.flush();
   file.close();

@@ -115,3 +115,70 @@ TEST_F(AiPrefetchCacheTest, InvalidEntriesDoNotGetWritten) {
   s.source.resize(MAX_SENTENCE_BYTES + 1, 'A');
   EXPECT_FALSE(save(scope(), s));
 }
+
+// A streamed reply can provide the sentence long before all word translations.
+TEST_F(AiPrefetchCacheTest, PartialSentenceAndWordUpdatesMergeAtomically) {
+  auto original = record();
+  Sentence first = original;
+  first.words.clear();
+  ASSERT_TRUE(save(scope(), first));
+  EXPECT_TRUE(has(scope(), original));
+  Sentence delta;
+  ASSERT_TRUE(pending(scope(), original, delta));
+  EXPECT_EQ(delta.translation, first.translation);
+  ASSERT_EQ(delta.words.size(), 2u);
+
+  Sentence oneWord = original;
+  oneWord.translation.clear();
+  oneWord.words.resize(1);
+  ASSERT_TRUE(save(scope(), oneWord));
+  ASSERT_TRUE(pending(scope(), original, delta));
+  EXPECT_EQ(delta.translation, first.translation);
+  ASSERT_EQ(delta.words.size(), 1u);
+  EXPECT_EQ(delta.words[0].offset, 108u);
+
+  // Missing the sentence is not a valid full translation cache hit.
+  std::string word, sentence;
+  EXPECT_TRUE(lookup(scope(), original, 100, "Destroy", word, sentence));
+  EXPECT_FALSE(lookup(scope(), original, 108, "him.", word, sentence));
+
+  Sentence secondWord = original;
+  secondWord.translation.clear();
+  secondWord.words.erase(secondWord.words.begin());
+  ASSERT_TRUE(save(scope(), secondWord));
+  EXPECT_FALSE(pending(scope(), original, delta));
+  EXPECT_TRUE(lookup(scope(), original, 108, "him.", word, sentence));
+}
+
+TEST_F(AiPrefetchCacheTest, WordOnlyRecordAndSentenceMerge) {
+  auto original = record();
+  Sentence first = original;
+  first.translation.clear();
+  first.words.resize(1);
+  ASSERT_TRUE(save(scope(), first));
+  std::string word, sentence;
+  EXPECT_FALSE(lookup(scope(), original, 100, "Destroy", word, sentence));
+  Sentence delta;
+  ASSERT_TRUE(pending(scope(), original, delta));
+  EXPECT_TRUE(delta.translation.empty());
+  ASSERT_EQ(delta.words.size(), 1u);
+  EXPECT_EQ(delta.words[0].offset, 108u);
+
+  Sentence translated = original;
+  translated.words.clear();
+  ASSERT_TRUE(save(scope(), translated));
+  EXPECT_TRUE(lookup(scope(), original, 100, "Destroy", word, sentence));
+  EXPECT_TRUE(pending(scope(), original, delta));
+  EXPECT_EQ(delta.words.size(), 1u);
+}
+
+TEST_F(AiPrefetchCacheTest, CorruptPartialDoesNotCountAsComplete) {
+  auto original = record();
+  Sentence incomplete = original;
+  incomplete.words.clear();
+  ASSERT_TRUE(save(scope(), incomplete));
+  Sentence delta;
+  EXPECT_TRUE(pending(scope(), original, delta));
+  ASSERT_EQ(delta.words.size(), original.words.size());
+  EXPECT_EQ(delta.translation, incomplete.translation);
+}
