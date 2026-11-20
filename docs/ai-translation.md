@@ -71,6 +71,34 @@ The result uses the existing plain-text DictionaryDefinitionActivity, so its
 word wrapping and page navigation are shared with dictionary display. Cyrillic
 output requires an available font containing Cyrillic glyphs.
 
+## Diagnostics on Picco
+
+On the Picco build from `53055c8`, successful Wi-Fi connection followed by
+`wolfSSL_connect failed: -188` does **not** establish which trust anchor is
+missing. The previous GTS-root expansion did not resolve the user's failure.
+This build logs only the HTTPS **host** (not the path, key or book text) and
+the wolfSSL `CA load` result. Interpret the next serial log as follows:
+
+- `CA load: result=1`: the compiled wolfSSL accepted the bundled CA store.
+  A later `-188` points to a server chain not verifiable from those roots
+  (or a missing intermediate); inspect that **specific** server hostname.
+- `CA load: result!=1`: the wolfSSL build could not load the trust store.
+  Investigate PEM parsing, cryptography configuration and memory rather than
+  adding more roots.
+- `wolfSSL_connect failed: -188`: TLS failed **before** any AI HTTP request
+  or API-key validation, independently of the model.
+
+A one-time Picco crash after saved Wi-Fi rejoin was recorded as
+`assert failed: sys_untimeout (... Required to lock TCPIP core ...)`.
+`WifiSelectionActivity` starts SNTP after joining; translation's fallback
+`trustedtime::syncNow()` previously restarted an already active SNTP using
+`configTzTime()`, potentially reaching `sntp_stop` off the lwIP core.
+`syncNow()` now reuses an already-started SNTP session. This addresses a
+concrete crash path but cannot prove the crash's PC without a symbolized
+backtrace from the exact firmware.
+
+Do not enable `setInsecure()` or record real API keys in diagnostic logs.
+
 ## Verification
 
 The repository host test can run with:

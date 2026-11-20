@@ -124,8 +124,11 @@ void startSync() {
 }
 
 bool syncNow(const uint32_t timeoutMs) {
-  // configureSntp() (configTzTime) restarts SNTP if already running.
-  configureSntp();
+  // WifiSelectionActivity already starts SNTP when the station joins. Do not
+  // call configTzTime() again while SNTP is running: it restarts sntp_stop(),
+  // which can trip lwIP's sys_untimeout TCPIP-core-lock assertion in Arduino.
+  // Starting only if absent also preserves the configured display timezone.
+  startSync();
   const unsigned long deadline = millis() + timeoutMs;
   while (sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED && static_cast<long>(deadline - millis()) > 0) {
     delay(100);

@@ -182,11 +182,22 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
     return false;
   }
 
+  // Print only the connection hostname, never the URL path, API key, book
+  // text, or request headers. We need the hostname to diagnose ASN_NO_SIGNER_E
+  // (-188) against the actual provider's public certificate chain.
+  const size_t hostStart = sizeof("https://") - 1;
+  const size_t hostEnd = url.find('/', hostStart);
+  const std::string host = url.substr(hostStart, hostEnd == std::string::npos ? std::string::npos : hostEnd - hostStart);
+  LOG_INF("AI", "TLS connecting: host=%s free=%u largest=%u ca_bytes=%u", host.c_str(),
+          static_cast<unsigned>(heap.freeBytes), static_cast<unsigned>(heap.largestBlockBytes),
+          static_cast<unsigned>(sizeof(ai_translation::ROOTS) - 1));
+
   freeink::SecureHttpClient http;
   http.setCACert(ai_translation::ROOTS);  // Verify peer chain AND hostname.
   http.setTimeout(30000);
   http.setUserAgent("CrossPoint-AI-Translation");
   if (!http.begin(url) || !http.connect()) {
+    LOG_ERR("AI", "HTTPS connection failed for host=%s", host.c_str());
     fail(tr(STR_AI_NETWORK_FAILED));
     return false;
   }

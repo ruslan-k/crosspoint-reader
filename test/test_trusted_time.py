@@ -130,11 +130,13 @@ int main() {
   assert(configurations == 1 && strcmp(getenv("TZ"), zone) == 0);
   trustedtime::startSync();
   assert(configurations == 1);
+  // A translation can request sync immediately after Wi-Fi has started it.
+  // This must NOT restart SNTP (configTzTime/sntp_stop), which can panic lwIP.
   assert(trustedtime::syncNow(200));
-  assert(configurations == 2 && strcmp(getenv("TZ"), zone) == 0);
+  assert(configurations == 1 && strcmp(getenv("TZ"), zone) == 0);
   completed = false;
   assert(!trustedtime::syncNow(200));
-  assert(strcmp(getenv("TZ"), zone) == 0);
+  assert(configurations == 1 && strcmp(getenv("TZ"), zone) == 0);
   unsetenv("TZ");
   enabled = false;
   trustedtime::startSync();
