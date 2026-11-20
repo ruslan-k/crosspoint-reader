@@ -716,6 +716,28 @@ void AiSentenceTranslationActivity::loop() {
         ai_translation_cache::save(bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel(), word_,
                                    sentence_, wordTranslation_, sentenceTranslation_);
     LOG_INF("AI_CACHE", "Foreground translation cache save: %s", cached ? "ok" : "skipped");
+#if defined(FREEINK_DEVICE_PICCO)
+    // Seed the same position-addressed cache used by streaming prefetch.
+    // Even if Translate closes before the next packet finishes, the already
+    // translated sentence and selected word remain durable and are excluded
+    // from future AI batch payloads.
+    if (origin_.sentenceStartOffset != UINT32_MAX && origin_.selectedWordOffset != UINT32_MAX &&
+        origin_.selectedWordOffset >= origin_.sentenceStartOffset) {
+      ai_prefetch::Sentence known;
+      known.spine = origin_.spine;
+      known.start = origin_.sentenceStartOffset;
+      known.end = UINT32_MAX;  // Selection does not carry the sentence's end offset.
+      known.source = sentence_;
+      known.translation = sentenceTranslation_;
+      if (!word_.empty() && word_.size() <= 160 && word_.find_first_of(" \n\t\r") == std::string::npos &&
+          !wordTranslation_.empty() && wordTranslation_.size() <= 256) {
+        known.words.push_back({origin_.selectedWordOffset, word_, wordTranslation_});
+      }
+      const ai_prefetch::Scope scope{bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel()};
+      LOG_INF("AI_CACHE", "Foreground seeded lookahead cache: %s",
+              ai_prefetch::save(scope, known) ? "ok" : "skipped");
+    }
+#endif
   } else if (retryPending_) {
     // No loops inside the network stack and no retry for errors other than a
     // provider-confirmed output-token limit. A failed retry is final.
