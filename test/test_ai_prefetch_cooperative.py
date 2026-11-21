@@ -9,13 +9,14 @@ root = Path(__file__).resolve().parents[1]
 prefetch = (root / "src/activities/reader/AiSentencePrefetchSession.cpp").read_text()
 header = (root / "src/activities/reader/AiSentencePrefetchSession.h").read_text()
 activity = (root / "src/activities/reader/AiSentenceTranslationActivity.cpp").read_text()
+main = (root / "src/main.cpp").read_text()
 cache = (root / "src/util/AiPrefetchCache.cpp").read_text()
 
 assert "MIN_INTERNAL_FREE = 94 * 1024" in prefetch
 assert "MIN_INTERNAL_BLOCK = 36 * 1024" in prefetch
 assert "MIN_INTERNAL_IN_FLIGHT = 15 * 1024" in prefetch
-assert "HTTP_READ_IDLE_TIMEOUT_MS = 6000" in prefetch
-assert "cfg.timeout_ms = HTTP_READ_IDLE_TIMEOUT_MS;" in prefetch
+assert "HTTP_READ_IDLE_TIMEOUT_MS = 60000" in prefetch
+assert "cfg.timeout_ms = HTTP_TIMEOUT_MS;" in prefetch
 assert "HTTP_STEP_TIMEOUT_MS = 100" not in prefetch
 assert "std::atomic<bool> gPrefetchTaskBusy" in prefetch
 assert "gNonStreamingEndpoint = worker_->scope.url;" in prefetch
@@ -26,7 +27,7 @@ assert "JsonDocument parsed(&gPsramJsonAllocator)" in prefetch
 assert "job->streaming = job->scope.url != gNonStreamingEndpoint" in prefetch
 assert "job->streaming ? \"text/event-stream\" : \"application/json\"" in prefetch
 assert "HTTP_TIMEOUT_MS = 60000" in prefetch
-assert "cfg.is_async = true;" in prefetch
+assert "cfg.is_async = false;" in prefetch
 assert "esp_http_client_perform(job.client)" in prefetch
 assert "pollBatch();" in prefetch
 assert "esp_http_client_cleanup(job.client)" in prefetch
@@ -36,6 +37,18 @@ assert "reportedMemoryPause_" in header
 assert "std::shared_ptr<Job> worker_" in header
 assert "xTaskCreateWithCaps(" in prefetch
 assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in prefetch
+assert "esp_http_client_set_timeout_ms" not in prefetch  # no reentrant transport mutation
+assert "httpWorkerBusy()" in prefetch and "httpWorkerBusy()" in main
+assert "shutdownWifiOnExit.exchange(false" in prefetch
+assert "prefetch_->cancel(wifiOwned_)" in activity
+assert "const bool deferredWifiShutdown" in activity
+assert "WiFi.mode(WIFI_OFF);" in prefetch  # after client cleanup, worker-owned shutdown
+for key in ("frames_parse_fail", "frames_with_text", "textParts", "model_chars",
+            "objects_parse_fail", "objects_bad_id", "reasoning_frames", "finish_length"):
+    assert key in prefetch, key
+for path in ('["choices"][0]["delta"]["content"]', '["choices"][0]["message"]["content"]',
+             '["choices"][0]["text"]', '["output_text"]'):
+    assert path in prefetch, path
 assert "vTaskDeleteWithCaps(nullptr)" in prefetch
 assert "std::atomic<bool> gPrefetchTaskBusy" in prefetch
 assert "worker_->cancel.store(true, std::memory_order_release)" in prefetch

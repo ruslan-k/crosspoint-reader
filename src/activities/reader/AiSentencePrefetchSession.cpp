@@ -42,10 +42,10 @@ namespace {
 constexpr size_t MAX_BATCH_BODY = 24 * 1024;
 constexpr size_t MAX_RESPONSE = 48 * 1024;
 constexpr int HTTP_TIMEOUT_MS = 60000;
-// HTTPS runs in the dedicated PSRAM worker, so the client itself can be
-// blocking. Allow slow TLS/headers/first-token responses, then bound each
-// subsequent SSE read by an idle timeout and the remaining request budget.
-constexpr int HTTP_READ_IDLE_TIMEOUT_MS = 15000;
+// A single 60s socket timeout permits slow TLS/headers and bounds a stalled
+// read. Never reconfigure the transport from inside its event callback;
+// cancellation is cooperative and WiFi/BLE teardown waits for TLS cleanup.
+constexpr int HTTP_READ_IDLE_TIMEOUT_MS = 60000;  // Single blocking socket timeout.
 constexpr uint32_t MIN_INTERNAL_IN_FLIGHT = 15 * 1024;
 // Strict preflight before allocating a dedicated HTTPS worker.
 constexpr uint32_t MIN_INTERNAL_FREE = 94 * 1024;
@@ -142,16 +142,6 @@ struct Response {
   Response& operator=(const Response&) = delete;
 };
 
-// Never lengthen a socket wait beyond the remaining request budget. The
-// client is owned exclusively by this worker, including all event callbacks.
-void updateReadTimeout(Response& response, esp_http_client_handle_t client, bool bodyStarted) {
-  if (!client || !response.startedAt) return;
-  const uint32_t elapsed = millis() - response.startedAt;
-  const int remaining = elapsed >= HTTP_TIMEOUT_MS ? 1 : HTTP_TIMEOUT_MS - elapsed;
-  const int timeout = bodyStarted ? std::min(remaining, HTTP_READ_IDLE_TIMEOUT_MS) : remaining;
-  esp_http_client_set_timeout_ms(client, timeout);
-}
-
 const char* httpResultName(esp_err_t result) {
   switch (result) {
     case ESP_OK:
@@ -179,19 +169,15 @@ esp_err_t onHttpEvent(esp_http_client_event_t* event) {
   if (!event) return ESP_FAIL;
   auto* result = static_cast<Response*>(event->user_data);
   if (!result) return ESP_FAIL;
-  if (result->cancel->load(std::memory_order_relaxed)) {
-    esp_http_client_set_timeout_ms(event->client, 1);
-    return ESP_FAIL;
-  }
+  // Only the worker owns the handle. Never close or mutate it in a callback.
+  if (result->cancel->load(std::memory_order_acquire)) return ESP_FAIL;
   switch (event->event_id) {
     case HTTP_EVENT_ON_CONNECTED:
       result->phase = "fetch_headers";
       LOG_INF("AI_PRE", "Phase: connected elapsed_ms=%u", static_cast<unsigned>(millis() - result->startedAt));
-      updateReadTimeout(*result, event->client, false);
       break;
     case HTTP_EVENT_HEADERS_SENT:
       LOG_INF("AI_PRE", "Phase: request_sent elapsed_ms=%u", static_cast<unsigned>(millis() - result->startedAt));
-      updateReadTimeout(*result, event->client, false);
       break;
     case HTTP_EVENT_ON_HEADER:
       if (!result->headersReceived) {
@@ -207,7 +193,6 @@ esp_err_t onHttpEvent(esp_http_client_event_t* event) {
         result->phase = "body";
         LOG_INF("AI_PRE", "Phase: first_byte elapsed_ms=%u", static_cast<unsigned>(millis() - result->startedAt));
       }
-      updateReadTimeout(*result, event->client, true);
       break;
     default: break;
   }
@@ -278,7 +263,7 @@ bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, 
                      "Omit the sentence translation if need_sentence=false. The words arrays contain "
                      "ONLY missing contextual word translations; return all you can without placeholders, "
                      "unnecessary explanations, markdown fences or an enclosing items array. "
-                     "Each word translation should be brief. Source:\n{\"sentences\":["))
+                     "Each word translation should be brief. No analysis, reasoning or explanations. Begin with the first id JSON object. Each line must be standalone JSON. Source:\n{\"sentences\":["))
     return false;
   for (size_t i = 0; i < batch.size(); ++i) {
     if (i && !prompt.append(",")) return false;
@@ -373,6 +358,8 @@ struct AiSentencePrefetchSession::Job {
   uint32_t completedObjects = 0;
   uint32_t recognizedItems = 0;
   uint32_t discardedObjects = 0;
+  uint32_t objectsParseFail = 0;
+  uint32_t objectsBadId = 0;
   Response response{&cancel};
   esp_http_client_handle_t client = nullptr;
   uint32_t startedAt = 0;
@@ -381,6 +368,13 @@ struct AiSentencePrefetchSession::Job {
   bool parseError = false;
   uint32_t sseFrames = 0;
   uint32_t textParts = 0;
+  uint32_t framesParseFail = 0;
+  uint32_t framesWithText = 0;
+  uint32_t modelChars = 0;
+  uint32_t reasoningFrames = 0;
+  uint32_t finishLength = 0;
+  bool firstFrameShapeLogged = false;
+  std::atomic<bool> shutdownWifiOnExit{false};
   bool stored[ai_prefetch::BATCH_SENTENCES] = {};
   uint8_t accepted[ai_prefetch::BATCH_SENTENCES] = {};
   char* sseLine = static_cast<char*>(heap_caps_malloc(SSE_LINE_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -406,16 +400,23 @@ void AiSentencePrefetchSession::acceptStreamObject(Job& job, std::string_view js
   ++job.completedObjects;
   JsonDocument parsed(&gPsramJsonAllocator);
   if (deserializeJson(parsed, json.data(), json.size()) != DeserializationError::Ok) {
+    ++job.objectsParseFail;
     ++job.discardedObjects;
     return;
   }
   const auto accept = [&](JsonVariantConst item) {
     if (!item["id"].is<int>()) {
+      ++job.objectsBadId;
       ++job.discardedObjects;
       return;
     }
     const int id = item["id"].as<int>();
-    if (id < 0 || id >= static_cast<int>(job.batch.size()) || job.accepted[id] >= 4) return;
+    if (id < 0 || id >= static_cast<int>(job.batch.size())) {
+      ++job.objectsBadId;
+      ++job.discardedObjects;
+      return;
+    }
+    if (job.accepted[id] >= 4) return;
     ++job.recognizedItems;
     if (saveItem(item, job.scope, job.batch, job.stored)) {
       ++job.accepted[id];
@@ -439,6 +440,8 @@ void AiSentencePrefetchSession::acceptStreamObject(Job& job, std::string_view js
   JsonArrayConst items = parsed["items"].as<JsonArrayConst>();
   if (!items.isNull()) {
     for (JsonVariantConst item : items) accept(item);
+  } else if (JsonArrayConst array = parsed.as<JsonArrayConst>(); !array.isNull()) {
+    for (JsonVariantConst item : array) accept(item);
   } else {
     accept(parsed.as<JsonVariantConst>());
   }
@@ -456,9 +459,9 @@ void AiSentencePrefetchSession::consumeStream(Job& job) {
     job.rawNonStreaming = buffer.data[i] == '{' || buffer.data[i] == '[';
     job.classified = true;
   }
-  if (job.rawNonStreaming) return;  // Buffer full ordinary JSON until HTTP completes.
+  if (job.rawNonStreaming) return;  // Buffer ordinary JSON until HTTP completes.
   const bool ok = job.framer->feedSse(buffer.data, buffer.size, [&](std::string_view frame) {
-    if (job.parseError) return;
+    if (job.parseError || job.cancel.load(std::memory_order_acquire)) return;
     ++job.sseFrames;
     if (!job.response.firstFrame) {
       job.response.firstFrame = true;
@@ -467,22 +470,81 @@ void AiSentencePrefetchSession::consumeStream(Job& job) {
               static_cast<unsigned>(millis() - job.startedAt));
     }
     JsonDocument chunk(&gPsramJsonAllocator);
-    if (deserializeJson(chunk, frame.data(), frame.size()) != DeserializationError::Ok) return;
+    const bool parsed = deserializeJson(chunk, frame.data(), frame.size()) == DeserializationError::Ok;
+    if (!job.firstFrameShapeLogged) {
+      job.firstFrameShapeLogged = true;
+      // Whitelist JSON punctuation only. Mask all letters, digits, UTF-8
+      // bytes and controls: no book/model/API text can appear in this log.
+      char shape[81] = {};
+      const size_t count = std::min(frame.size(), sizeof(shape) - 1);
+      for (size_t i = 0; i < count; ++i) {
+        const char ch = frame[i];
+        shape[i] = ch == '{' || ch == '}' || ch == '[' || ch == ']' || ch == ':' ||
+                           ch == ',' || ch == '"' || ch == '\\'
+                       ? ch
+                       : 'x';
+      }
+      const JsonVariantConst content = chunk["choices"][0]["delta"]["content"];
+      const char* kind = !parsed ? "parse_fail" : content.is<const char*>() ? "string"
+                                                : content.is<JsonArrayConst>() ? "array"
+                                                : content.isNull() ? "missing" : "other";
+      const bool hasReasoning = !chunk["choices"][0]["delta"]["reasoning_content"].isNull() ||
+                                !chunk["choices"][0]["delta"]["reasoning"].isNull();
+      LOG_INF("AI_PRE", "SSE first frame: delta_content=%s reasoning=%u bytes=%u shape=%s", kind,
+              static_cast<unsigned>(hasReasoning), static_cast<unsigned>(frame.size()), shape);
+    }
+    if (!parsed) {
+      ++job.framesParseFail;
+      return;
+    }
+    if (!chunk["choices"][0]["delta"]["reasoning_content"].isNull() ||
+        !chunk["choices"][0]["delta"]["reasoning"].isNull()) {
+      ++job.reasoningFrames;  // Reasoning is never cached as a translation.
+    }
+    const char* finish = chunk["choices"][0]["finish_reason"].as<const char*>();
+    if (finish && strcmp(finish, "length") == 0) ++job.finishLength;
+    const char* geminiFinish = chunk["candidates"][0]["finishReason"].as<const char*>();
+    if (geminiFinish && strcmp(geminiFinish, "MAX_TOKENS") == 0) ++job.finishLength;
+
+    bool frameHadText = false;
     const auto feedText = [&](const char* text) {
-      if (!text || job.parseError) return;
+      if (!text || !*text || job.parseError || job.cancel.load(std::memory_order_acquire)) return;
+      frameHadText = true;
       ++job.textParts;
-      if (!job.framer->feedModel(text, strlen(text),
-                                 [&](std::string_view record) { acceptStreamObject(job, record); })) {
+      const size_t len = strlen(text);
+      job.modelChars += static_cast<uint32_t>(len);
+      if (!job.framer->feedModel(text, len, [&](std::string_view record) { acceptStreamObject(job, record); })) {
         job.parseError = true;
       }
     };
-    if (job.gemini) {
-      for (JsonVariantConst part : chunk["candidates"][0]["content"]["parts"].as<JsonArrayConst>()) {
-        feedText(part["text"].as<const char*>());
+    const auto feedContent = [&](JsonVariantConst content) {
+      if (const char* text = content.as<const char*>()) {
+        feedText(text);
+      } else if (JsonArrayConst parts = content.as<JsonArrayConst>(); !parts.isNull()) {
+        for (JsonVariantConst part : parts) {
+          if (const char* text = part.as<const char*>()) {
+            feedText(text);
+          } else {
+            feedText(part["text"].as<const char*>());
+          }
+        }
+      } else {
+        feedText(content["text"].as<const char*>());
       }
+    };
+    if (job.gemini) {
+      feedContent(chunk["candidates"][0]["content"]["parts"]);
     } else {
-      feedText(chunk["choices"][0]["delta"]["content"].as<const char*>());
+      feedContent(chunk["choices"][0]["delta"]["content"]);
+      if (!frameHadText) feedContent(chunk["choices"][0]["message"]["content"]);
+      if (!frameHadText) feedContent(chunk["choices"][0]["text"]);
+      if (!frameHadText) feedContent(chunk["output_text"]);
+      const char* type = chunk["type"].as<const char*>();
+      if (!frameHadText && type && strcmp(type, "response.output_text.delta") == 0) {
+        feedContent(chunk["delta"]);
+      }
     }
+    if (frameHadText) ++job.framesWithText;
   });
   if (!ok) job.parseError = true;
   buffer.size = 0;  // Bounded reusable PSRAM transport buffer.
@@ -587,16 +649,31 @@ void AiSentencePrefetchSession::runBatch(void* data) {
   }
   LOG_INF("AI_PRE",
           "Worker stored %u/%u HTTP=%d err=%d err_name=%s tls=%d tls_flags=%d socket_errno=%d "
-          "bytes=%u frames=%u objects=%u recognized=%u rejected=%u reason=%s phase=%s elapsed_ms=%u",
+          "bytes=%u frames=%u frames_parse_fail=%u frames_with_text=%u textParts=%u model_chars=%u "
+          "objects=%u objects_parse_fail=%u objects_bad_id=%u recognized=%u rejected=%u "
+          "reasoning_frames=%u finish_length=%u reason=%s phase=%s elapsed_ms=%u",
           static_cast<unsigned>(job.savedCount), static_cast<unsigned>(job.batch.size()), status,
           static_cast<int>(result), httpResultName(result), tlsError, tlsFlags, socketError,
           static_cast<unsigned>(job.response.totalBytes), static_cast<unsigned>(job.sseFrames),
-          static_cast<unsigned>(job.completedObjects), static_cast<unsigned>(job.recognizedItems),
-          static_cast<unsigned>(job.discardedObjects), stopReason, job.response.phase,
+          static_cast<unsigned>(job.framesParseFail), static_cast<unsigned>(job.framesWithText),
+          static_cast<unsigned>(job.textParts), static_cast<unsigned>(job.modelChars),
+          static_cast<unsigned>(job.completedObjects), static_cast<unsigned>(job.objectsParseFail),
+          static_cast<unsigned>(job.objectsBadId), static_cast<unsigned>(job.recognizedItems),
+          static_cast<unsigned>(job.discardedObjects), static_cast<unsigned>(job.reasoningFrames),
+          static_cast<unsigned>(job.finishLength), stopReason, job.response.phase,
           static_cast<unsigned>(millis() - job.startedAt));
+  // The handle and deferred writes are already gone. Publish completion, then
+  // exchange the WiFi handoff bit to handle a concurrent UI exit exactly once.
   job.done.store(true, std::memory_order_release);
-  gPrefetchTaskBusy.store(false, std::memory_order_release);
+  if (job.shutdownWifiOnExit.exchange(false, std::memory_order_acq_rel)) {
+    WiFi.disconnect(false);
+    WiFi.mode(WIFI_OFF);
+    LOG_INF("AI_PRE", "Cancelled worker: WiFi shutdown after HTTP cleanup");
+  }
+  // Release job buffers before allowing BLE to start. The worker's stack
+  // is released by vTaskDeleteWithCaps immediately afterwards.
   holder.reset();
+  gPrefetchTaskBusy.store(false, std::memory_order_release);
   vTaskDeleteWithCaps(nullptr);
 }
 
@@ -626,12 +703,27 @@ AiSentencePrefetchSession::AiSentencePrefetchSession(ai_prefetch::Scope scope, S
 
 AiSentencePrefetchSession::~AiSentencePrefetchSession() { cancel(); }
 
-void AiSentencePrefetchSession::cancel() {
+bool AiSentencePrefetchSession::httpWorkerBusy() {
+  return gPrefetchTaskBusy.load(std::memory_order_acquire);
+}
+
+bool AiSentencePrefetchSession::cancel(bool shutdownWifi) {
   stopped_ = true;
-  if (worker_) worker_->cancel.store(true, std::memory_order_release);
-  worker_.reset();  // The PSRAM worker owns the client until network shutdown.
+  auto worker = std::move(worker_);
+  if (worker) {
+    if (shutdownWifi) worker->shutdownWifiOnExit.store(true, std::memory_order_release);
+    worker->cancel.store(true, std::memory_order_release);
+    // If worker finished before handoff, its HTTP client is already cleaned.
+    if (shutdownWifi && worker->done.load(std::memory_order_acquire) &&
+        worker->shutdownWifiOnExit.exchange(false, std::memory_order_acq_rel)) {
+      WiFi.disconnect(false);
+      WiFi.mode(WIFI_OFF);
+      LOG_INF("AI_PRE", "Cancelled completed worker: WiFi shutdown after HTTP cleanup");
+    }
+  }
   pageTokens_.clear();
   batch_.clear();
+  return shutdownWifi && static_cast<bool>(worker);
 }
 
 bool AiSentencePrefetchSession::openPage() {

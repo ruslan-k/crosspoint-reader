@@ -751,12 +751,13 @@ void AiSentenceTranslationActivity::loop() {
 
 void AiSentenceTranslationActivity::onExit() {
   Activity::onExit();
-  if (prefetch_) {
-    prefetch_->cancel();
-    prefetch_.reset();
-  }
+  // Closing the popup must not switch off WiFi beneath esp_http_client_perform.
+  // Hand WiFi ownership to the worker; it tears the radio down only AFTER
+  // HTTP cleanup, even when the popup has already been destroyed.
+  const bool deferredWifiShutdown = prefetch_ && prefetch_->cancel(wifiOwned_);
+  prefetch_.reset();
   releaseBackground();
-  if (wifiOwned_) {
+  if (wifiOwned_ && !deferredWifiShutdown) {
     WiFi.disconnect(false);
     WiFi.mode(WIFI_OFF);
   }

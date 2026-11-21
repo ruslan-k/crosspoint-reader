@@ -14,9 +14,9 @@ class Page;
 class Section;
 class TextBlock;
 
-// Used only while the modal Translate activity is on screen. EPUB extraction
-// happens in short main-loop ticks; async HTTPS uses Translate's existing
-// task stack, not a second FreeRTOS worker.
+// Owned by the Translate popup. EPUB extraction runs in short UI ticks;
+// blocking HTTPS runs only in a dedicated PSRAM worker. A global busy gate
+// keeps BLE/WiFi teardown out of the active worker's TLS lifetime.
 class AiSentencePrefetchSession {
  public:
   AiSentencePrefetchSession(ai_prefetch::Scope scope, Section* section, uint32_t spine, int firstPage,
@@ -24,7 +24,10 @@ class AiSentencePrefetchSession {
   ~AiSentencePrefetchSession();
 
   void tick();
-  void cancel();
+  // Returns true if the worker took ownership of a requested WiFi shutdown.
+  bool cancel(bool shutdownWifi = false);
+  // Safe to query from the reader's BLE policy without an activity pointer.
+  static bool httpWorkerBusy();
 
   struct Job;  // Owns the HTTPS handle and request/response buffers.
 

@@ -1,6 +1,9 @@
 #include <Arduino.h>
 #include <BlePageTurner.h>
 #include <BoardConfig.h>
+#if FREEINK_DEVICE_PICCO
+#include "activities/reader/AiSentencePrefetchSession.h"
+#endif
 #include <Epub.h>
 #include <FontCacheManager.h>
 #include <FontDecompressor.h>
@@ -300,7 +303,13 @@ bool deliver(const bleturner::Action action) {
 }
 
 bool yieldForRadio() { return true; }        // the reader keeps no parser alive between pages
-bool fileTransferActive() { return false; }  // file transfer is a screen of its own: the radio is off there
+bool fileTransferActive() {
+#if FREEINK_DEVICE_PICCO
+  // Reuse BLE's storage-busy gate to defer start until HTTP/TLS cleanup.
+  if (AiSentencePrefetchSession::httpWorkerBusy()) return true;
+#endif
+  return false;  // File transfer is a separate screen; radio off there.
+}
 void restartIntoBook() { silentRestartToReader(); }
 
 // The radio needs a steady clock while it is up or changing state.
