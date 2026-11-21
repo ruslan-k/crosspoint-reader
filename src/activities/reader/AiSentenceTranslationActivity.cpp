@@ -28,6 +28,7 @@
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/AiSentenceUtils.h"
 #include "util/AiApiEndpoint.h"
 #include "util/AiBookCache.h"
 #include "util/AiCacheServer.h"
@@ -318,6 +319,11 @@ void AiSentenceTranslationActivity::onEnter() {
   captureUnderlyingPage();
   if (sentence_.empty() || sentence_.size() > MAX_SENTENCE_BYTES) {
     fail(tr(STR_AI_BAD_RESPONSE));
+    return;
+  }
+  if (ai_sentence::isRussianText(sentence_)) {
+    LOG_INF("AI_CACHE", "Skip: source already Russian");
+    openResult(sentence_);
     return;
   }
   std::string cachedSentence;

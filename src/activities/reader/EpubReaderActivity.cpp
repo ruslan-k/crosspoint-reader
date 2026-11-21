@@ -445,7 +445,10 @@ bool EpubReaderActivity::loadBook() {
   // Start automatically for a missing whole-book package. No SHA scan or
   // networking in this loading path; the idle worker handles both.
   AI_TRANSLATION_STORE.loadFromFile();
-  if (ai_book_cache::needsServer(bookPath))
+  const std::string& bookLanguage = epub->getLanguage();
+  if (bookLanguage.rfind("ru", 0) == 0) {
+    LOG_INF("AI_SRV", "skip: Russian source book");
+  } else if (ai_book_cache::needsServer(bookPath))
     ai_cache_server::watch(bookPath, AI_TRANSLATION_STORE.getCacheServerUrl(),
                             AI_TRANSLATION_STORE.getCacheServerToken());
 #endif

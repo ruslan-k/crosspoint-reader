@@ -9,6 +9,18 @@
 // handled by ClipSelectionActivity.
 namespace ai_sentence {
 
+// Skip translation for already-Russian source text (UTF-8 Cyrillic).
+// Three letters is enough to avoid tripping on a lone Cyrillic name.
+inline bool isRussianText(std::string_view text) {
+  size_t letters = 0;
+  for (size_t i = 0; i + 1 < text.size() && letters < 3; ++i) {
+    const unsigned char c = static_cast<unsigned char>(text[i]);
+    const unsigned char n = static_cast<unsigned char>(text[i + 1]);
+    if ((c == 0xD0 && n >= 0x80) || (c == 0xD1 && n >= 0x80 && n <= 0x8F)) ++letters;
+  }
+  return letters >= 3;
+}
+
 inline bool isEnd(const char* word) {
   if (!word || !*word) return false;
   std::string_view token(word);
