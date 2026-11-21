@@ -42,10 +42,10 @@ namespace {
 constexpr size_t MAX_BATCH_BODY = 24 * 1024;
 constexpr size_t MAX_RESPONSE = 48 * 1024;
 constexpr int HTTP_TIMEOUT_MS = 60000;
-// Async ESP-IDF returns HTTP_INCOMPLETE_DATA when a TLS read times out
-// mid-SSE-chunk. 100 ms caused every OpenCode Go lookahead batch to fail.
-// Socket idle limit is distinct from the 60-second overall request budget.
-constexpr int HTTP_READ_IDLE_TIMEOUT_MS = 6000;
+// HTTPS runs in the dedicated PSRAM worker, so the client itself can be
+// blocking. Allow slow TLS/headers/first-token responses, then bound each
+// subsequent SSE read by an idle timeout and the remaining request budget.
+constexpr int HTTP_READ_IDLE_TIMEOUT_MS = 15000;
 constexpr uint32_t MIN_INTERNAL_IN_FLIGHT = 15 * 1024;
 // Cooperative client uses the existing Translate task stack, unlike the old worker.
 constexpr uint32_t MIN_INTERNAL_FREE = 94 * 1024;
@@ -124,6 +124,13 @@ struct Response {
   bool overflow = false;
   size_t totalBytes = 0;
   uint32_t dataEvents = 0;
+  uint32_t startedAt = 0;
+  bool connected = false;
+  bool headersSent = false;
+  bool headersReceived = false;
+  bool firstByte = false;
+  bool firstFrame = false;
+  const char* phase = "connect";
   std::atomic<bool>* cancel = nullptr;
   void (*onDataReady)(void*) = nullptr;
   void* onDataContext = nullptr;
@@ -137,10 +144,64 @@ struct Response {
   Response& operator=(const Response&) = delete;
 };
 
+// Never lengthen a socket wait beyond the remaining request budget. The
+// client is owned exclusively by this worker, including all event callbacks.
+void updateReadTimeout(Response& response, esp_http_client_handle_t client, bool bodyStarted) {
+  if (!client || !response.startedAt) return;
+  const uint32_t elapsed = millis() - response.startedAt;
+  const int remaining = elapsed >= HTTP_TIMEOUT_MS ? 1 : HTTP_TIMEOUT_MS - elapsed;
+  const int timeout = bodyStarted ? std::min(remaining, HTTP_READ_IDLE_TIMEOUT_MS) : remaining;
+  esp_http_client_set_timeout_ms(client, timeout);
+}
+
+const char* httpResultName(esp_err_t result) {
+  switch (result) {
+    case ESP_OK: return "ESP_OK";
+    case ESP_ERR_HTTP_EAGAIN: return "ESP_ERR_HTTP_EAGAIN";
+    case ESP_ERR_HTTP_FETCH_HEADER: return "ESP_ERR_HTTP_FETCH_HEADER";
+    case ESP_ERR_HTTP_CONNECT: return "ESP_ERR_HTTP_CONNECT";
+    case ESP_ERR_HTTP_WRITE_DATA: return "ESP_ERR_HTTP_WRITE_DATA";
+    default: return esp_err_to_name(result);
+  }
+}
+
 esp_err_t onHttpEvent(esp_http_client_event_t* event) {
   if (!event) return ESP_FAIL;
   auto* result = static_cast<Response*>(event->user_data);
-  if (!result || result->cancel->load(std::memory_order_relaxed)) return ESP_FAIL;
+  if (!result) return ESP_FAIL;
+  if (result->cancel->load(std::memory_order_relaxed)) {
+    esp_http_client_set_timeout_ms(event->client, 1);
+    return ESP_FAIL;
+  }
+  switch (event->event_id) {
+    case HTTP_EVENT_ON_CONNECTED:
+      result->connected = true;
+      result->phase = "fetch_headers";
+      LOG_INF("AI_PRE", "Phase: connected elapsed_ms=%u", static_cast<unsigned>(millis() - result->startedAt));
+      updateReadTimeout(*result, event->client, false);
+      break;
+    case HTTP_EVENT_HEADERS_SENT:
+      result->headersSent = true;
+      LOG_INF("AI_PRE", "Phase: request_sent elapsed_ms=%u", static_cast<unsigned>(millis() - result->startedAt));
+      updateReadTimeout(*result, event->client, false);
+      break;
+    case HTTP_EVENT_ON_HEADER:
+      if (!result->headersReceived) {
+        result->headersReceived = true;
+        result->phase = "first_byte";
+        LOG_INF("AI_PRE", "Phase: response_headers elapsed_ms=%u", static_cast<unsigned>(millis() - result->startedAt));
+      }
+      break;
+    case HTTP_EVENT_ON_DATA:
+      if (!result->firstByte) {
+        result->firstByte = true;
+        result->phase = "body";
+        LOG_INF("AI_PRE", "Phase: first_byte elapsed_ms=%u", static_cast<unsigned>(millis() - result->startedAt));
+      }
+      updateReadTimeout(*result, event->client, true);
+      break;
+    default: break;
+  }
   if (event->event_id != HTTP_EVENT_ON_DATA) return ESP_OK;
   if (!result->data || event->data_len < 0 || static_cast<size_t>(event->data_len) > MAX_RESPONSE - result->size) {
     result->overflow = true;
@@ -345,6 +406,7 @@ void AiSentencePrefetchSession::acceptStreamObject(Job& job, std::string_view js
     ++job.recognizedItems;
     if (saveItem(item, job.scope, job.batch, job.stored)) {
       ++job.accepted[id];
+      if (job.accepted[id] == 1) LOG_INF("AI_PRE", "Phase: stored id=%d", id);
       // The checkpoint is advisory only. Never skip a sentence merely
       // because this counter claims that a later offset was visited.
       if (ai_prefetch::saveCheckpoint(job.scope, job.checkpoint)) {
@@ -385,6 +447,12 @@ void AiSentencePrefetchSession::consumeStream(Job& job) {
   const bool ok = job.framer->feedSse(buffer.data, buffer.size, [&](std::string_view frame) {
     if (job.parseError) return;
     ++job.sseFrames;
+    if (!job.response.firstFrame) {
+      job.response.firstFrame = true;
+      job.response.phase = "sse";
+      LOG_INF("AI_PRE", "Phase: first_sse_frame elapsed_ms=%u",
+              static_cast<unsigned>(millis() - job.startedAt));
+    }
     JsonDocument chunk(&gPsramJsonAllocator);
     if (deserializeJson(chunk, frame.data(), frame.size()) != DeserializationError::Ok) return;
     const auto feedText = [&](const char* text) {
@@ -446,21 +514,31 @@ void AiSentencePrefetchSession::runBatch(void* data) {
   Job& job = *holder;
 
   esp_err_t result = ESP_FAIL;
-  int status = 0;
-  if (!job.cancel.load(std::memory_order_acquire) && job.client) {
-    while (!job.cancel.load(std::memory_order_acquire) &&
-           static_cast<uint32_t>(millis() - job.startedAt) < HTTP_TIMEOUT_MS) {
-      const auto heap = HalMemory::getInternalHeap();
-      if (heap.freeBytes < MIN_INTERNAL_IN_FLIGHT || WiFi.status() != WL_CONNECTED) break;
-      result = esp_http_client_perform(job.client);
-      status = esp_http_client_get_status_code(job.client);
-      if (status == 200) consumeStream(job);
-      if (result != ESP_ERR_HTTP_EAGAIN) break;
-      vTaskDelay(pdMS_TO_TICKS(10));
-    }
+  int status = -1;
+  int tlsError = 0;
+  int tlsFlags = 0;
+  int socketError = 0;
+  const char* stopReason = "not_started";
+  if (job.cancel.load(std::memory_order_acquire)) {
+    stopReason = "cancelled";
+  } else if (WiFi.status() != WL_CONNECTED) {
+    stopReason = "wifi_disconnected";
+  } else if (HalMemory::getInternalHeap().freeBytes < MIN_INTERNAL_IN_FLIGHT) {
+    stopReason = "low_internal_heap";
+  } else if (job.client) {
+    // This is blocking ONLY in the dedicated worker, never on the UI task.
+    // Exactly one perform call: no repeated, potentially billable POST.
+    stopReason = "http_error";
+    result = esp_http_client_perform(job.client);
+    status = esp_http_client_get_status_code(job.client);
+    if (status == 200) consumeStream(job);
   }
 
   if (job.client) {
+    socketError = esp_http_client_get_errno(job.client);
+    if (result != ESP_OK) {
+      esp_http_client_get_and_clear_last_tls_error(job.client, &tlsError, &tlsFlags);
+    }
     esp_http_client_cleanup(job.client);  // TLS freed before any deferred cache writes
     job.client = nullptr;
   }
@@ -478,11 +556,24 @@ void AiSentencePrefetchSession::runBatch(void* data) {
   for (size_t i = 0; i < job.batch.size(); ++i) {
     if (job.stored[i]) ++job.savedCount;
   }
-  LOG_INF("AI_PRE", "Worker stored %u/%u HTTP=%d err=%d bytes=%u frames=%u objects=%u recognized=%u rejected=%u",
+  if (job.cancel.load(std::memory_order_acquire)) {
+    stopReason = "cancelled";
+  } else if (result == ESP_OK && status == 200) {
+    stopReason = job.parseError ? "parser_error" : job.savedCount ? "completed" : "no_usable_items";
+  } else if (result == ESP_OK && status != 200) {
+    stopReason = "http_status";
+  } else if (result != ESP_FAIL || stopReason[0] == 'h') {
+    stopReason = "transport_error";
+  }
+  LOG_INF("AI_PRE",
+          "Worker stored %u/%u HTTP=%d err=%d err_name=%s tls=%d tls_flags=%d socket_errno=%d "
+          "bytes=%u frames=%u objects=%u recognized=%u rejected=%u reason=%s phase=%s elapsed_ms=%u",
           static_cast<unsigned>(job.savedCount), static_cast<unsigned>(job.batch.size()), status,
-          static_cast<int>(result), static_cast<unsigned>(job.response.totalBytes),
-          static_cast<unsigned>(job.sseFrames), static_cast<unsigned>(job.completedObjects),
-          static_cast<unsigned>(job.recognizedItems), static_cast<unsigned>(job.discardedObjects));
+          static_cast<int>(result), httpResultName(result), tlsError, tlsFlags, socketError,
+          static_cast<unsigned>(job.response.totalBytes), static_cast<unsigned>(job.sseFrames),
+          static_cast<unsigned>(job.completedObjects), static_cast<unsigned>(job.recognizedItems),
+          static_cast<unsigned>(job.discardedObjects), stopReason, job.response.phase,
+          static_cast<unsigned>(millis() - job.startedAt));
   job.done.store(true, std::memory_order_release);
   gPrefetchTaskBusy.store(false, std::memory_order_release);
   holder.reset();
@@ -688,8 +779,8 @@ bool AiSentencePrefetchSession::launchBatch() {
   esp_http_client_config_t cfg{};
   cfg.url = job->url.c_str();
   cfg.method = HTTP_METHOD_POST;
-  cfg.is_async = true;
-  cfg.timeout_ms = HTTP_READ_IDLE_TIMEOUT_MS;
+  cfg.is_async = false;  // The dedicated FreeRTOS worker owns this blocking client.
+  cfg.timeout_ms = HTTP_TIMEOUT_MS;  // Connect, headers and first byte may be slow.
   cfg.cert_pem = ai_translation::ROOTS;
   cfg.skip_cert_common_name_check = false;
   cfg.disable_auto_redirect = true;
@@ -731,11 +822,13 @@ bool AiSentencePrefetchSession::launchBatch() {
     return false;
   }
   job->startedAt = millis();
-  LOG_INF("AI_PRE", "Batch started: count=%u mode=%s idle_timeout=%d internal=%u largest=%u",
-          static_cast<unsigned>(job->batch.size()), job->streaming ? "sse" : "json", HTTP_READ_IDLE_TIMEOUT_MS,
+  job->response.startedAt = job->startedAt;
+  LOG_INF("AI_PRE", "Batch started: count=%u mode=%s header_timeout=%d idle_timeout=%d internal=%u largest=%u",
+          static_cast<unsigned>(job->batch.size()), job->streaming ? "sse" : "json", HTTP_TIMEOUT_MS,
+          HTTP_READ_IDLE_TIMEOUT_MS,
           static_cast<unsigned>(HalMemory::getInternalHeap().freeBytes),
           static_cast<unsigned>(HalMemory::getInternalHeap().largestBlockBytes));
-  // Allocate a separate low-priority FreeRTOS stack in PSRAM so TLS waits
+  // Allocate a separate low-priority FreeRTOS stack in PSRAM so blocking TLS
   // cannot block Translate input. A global lease prevents overlapping tasks
   // when the popup is closed and reopened quickly.
   bool wasBusy = false;
