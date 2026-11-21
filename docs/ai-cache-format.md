@@ -7,10 +7,11 @@ contain portions of the book and AI translations. Keep your microSD private.
 ## Automatic cache-server client (Picco)
 
 In the web UI's **AI Translation** section, set **AI Cache Server URL** to a
-trusted server, for example `http://192.168.50.37:8791` or a Tailscale-reachable
-IP/hostname. Empty (the default) disables the feature. The URL is stored as
-`ai_cache_server_url` in `/.crosspoint/ai-translation.json`. The Cache Server
-does not use the device's BYOK credentials.
+trusted server, for example `http://192.168.50.37:8791`, a Tailscale IP, or a
+Funnel URL such as `https://<host>.<tailnet>.ts.net/api/cache`. Empty (the
+default) disables the feature. The URL is stored as `ai_cache_server_url` in
+`/.crosspoint/ai-translation.json`. The Cache Server does not use the device's
+BYOK credentials.
 
 When a book is opened without a COMPLETE package, a low-priority worker checks
 `GET /api/cache/status?sha=<64 lowercase EPUB SHA-256>`. If the server reports
@@ -26,10 +27,12 @@ The reader remains usable while requests run on a separate worker.
 All operations are best-effort: network errors stop the current attempt without
 disabling existing foreground translation or position-based prefetch. Reopen the
 book/Translate to retry. The firmware only knows one configurable base URL;
-Tailscale routing, server hosting and EPUB translation are host responsibilities.
+Tailscale routing, server hosting and EPUB translation are host responsibilities
+(see [server/README.md](../server/README.md#remote-access-tailscale)).
 No automatic discovery and no retry across several server addresses are provided.
-Use HTTPS for transmission confidentiality where supported; plain HTTP sends
-the EPUB and package unencrypted.
+If the server requires a token, the firmware appends it as `?token=` and the
+settings GET API never returns it. Use HTTPS for transmission confidentiality
+where supported; plain HTTP sends the EPUB and package unencrypted.
 
 Logs under `[AI_SRV]`: `disabled`, `job queued sha=...`,
 `progress done/total`, `downloaded bytes=... complete=0/1`, and

@@ -44,6 +44,37 @@ the package is stored next to the EPUB.
 Jobs are resumable: translations are stored by FNV-1a hash of the normalized
 source sentence, so an interrupted job continues from where it stopped.
 
+## Remote access (Tailscale)
+
+The firmware's base URL may be either the server origin or a Funnel path
+prefix: it appends `/api/cache` when the URL does not already end with it,
+then `/status`, `/job` or `/download`.
+
+To expose only the API prefix with Funnel:
+
+```bash
+tailscale funnel --bg --set-path /api/cache 8791
+tailscale funnel status
+```
+
+A working host reports:
+
+```text
+https://minisforum.tail36c157.ts.net (Funnel on)
+|-- /api/cache   proxy http://127.0.0.1:8791
+```
+
+Set **AI Cache Server URL** in the device web UI to
+`https://<host>.<tailnet>.ts.net/api/cache`. If the reader is on the tailnet,
+prefer `tailscale serve --bg --set-path /api/cache 8791` so the service stays
+private.
+
+Funnel is reachable from the public internet: run the server with
+`CP_CACHE_TOKEN=<secret>` and enter the same value in **AI Cache Server Token**
+in the device web UI; the firmware appends it as `?token=`. `/health` is not
+mapped through this prefix (404), so check
+`GET /api/cache/status?sha=...` for remote health.
+
 ## Sentence alignment
 
 Each sentence in a batch has an `id` and a short `key` (batch position plus 16

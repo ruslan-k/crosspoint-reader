@@ -51,4 +51,4 @@ Sentence boundaries must still exactly match the reader's extraction, including 
 
 The host groups sentences into NDJSON batches. Besides `id`, each sentence carries a short `key` that the model must echo; the server accepts a line only when the key matches the expected sentence and all batch ids are present exactly once, otherwise it retries. This prevents a model numbering error from shifting translations onto neighbouring sentences — the failure seen at `idx=1906` in the earlier 4073-sentence cache. Changing `reasoning effort` does not prevent it, and the strict check does not change the `.aic` format.
 
-Set **AI Cache Server URL** in the device web UI to `http://<host>:8791`; the API, environment variables, resumability and verification commands are documented in the [server README](../server/README.md).
+Set **AI Cache Server URL** in the device web UI to `http://<host>:8791`, or to a Tailscale Serve/Funnel path ending in `/api/cache` when the server is remote. The API, environment variables, Tailscale setup, resumability and verification commands are documented in the [server README](../server/README.md).

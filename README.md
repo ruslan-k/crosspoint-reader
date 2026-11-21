@@ -165,7 +165,7 @@ cd server
 python3 cache_server.py
 ```
 
-Then set **AI Cache Server URL** in the device web UI to `http://<host>:8791`. The whole-book job is resumable and publishes snapshots while it runs. Details, API and verification: [server/README.md](./server/README.md), [docs/ai-translation.md](./docs/ai-translation.md).
+Then set **AI Cache Server URL** in the device web UI to `http://<host>:8791`, or to a Tailscale Serve/Funnel path such as `https://<host>.<tailnet>.ts.net/api/cache` for remote access. The whole-book job is resumable and publishes snapshots while it runs. Details, API, Tailscale setup and verification: [server/README.md](./server/README.md), [docs/ai-translation.md](./docs/ai-translation.md).
 
 ---
 
