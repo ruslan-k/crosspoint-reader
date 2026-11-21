@@ -48,4 +48,15 @@ assert 'httpConfig.cert_pem = ai_translation::ROOTS;' in foreground
 assert 'cfg.cert_pem = ai_translation::ROOTS;' in prefetch
 assert 'esp_http_client_perform(job.client)' in prefetch
 
+
+# Prefetch-only override for OpenCode Go hy4-flash-free. It supports none/high,
+# but not minimal. The saved preference and foreground request stay unchanged.
+assert 'job->scope.model == "hy4-flash-free" && ai_endpoint::isOpenCodeGoUrl(job->url)' in prefetch
+assert 'fastHy4 ? std::string_view("none")' in prefetch
+assert 'fastHy4 ? 4096u : 2048u' in prefetch
+assert 'request.integer(maxTokens)' in prefetch
+assert 'effort=%.*s budget=%u' in prefetch
+assert 'job->gemini ? "ignored-gemini"' in prefetch
+assert 'req["max_tokens"] = ai_completion::maxOutputTokens(generationAttempt_);' in foreground
+
 print("AI reasoning-effort selector/persistence/request contracts passed")

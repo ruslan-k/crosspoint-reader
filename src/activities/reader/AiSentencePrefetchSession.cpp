@@ -25,6 +25,7 @@
 #include <memory>
 #include <new>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -254,7 +255,8 @@ std::string getOutput(const Response& response, bool gemini) {
 }
 
 bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, bool streaming,
-                  const std::string& model, char* body, size_t capacity, size_t& bodyBytes) {
+                  const std::string& model, std::string_view reasoningEffort, unsigned maxTokens,
+                   char* body, size_t capacity, size_t& bodyBytes) {
   // All large serialization buffers are in PSRAM. No intermediate ArduinoJson
   // documents, copied prompt strings or payload strings occupy internal heap.
   auto promptBuffer = HalMemory::allocatePsram(17 * 1024);
@@ -292,13 +294,13 @@ bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, 
       return false;
   } else {
     if (!request.append("{\"model\":") || !request.quoted(model)) return false;
-    const std::string& reasoningEffort = AI_TRANSLATION_STORE.getReasoningEffort();
     if (reasoningEffort != "default" &&
         (!request.append(",\"reasoning_effort\":") || !request.quoted(reasoningEffort)))
       return false;
-    if (!request.append(streaming
-                            ? ",\"max_tokens\":2048,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":"
-                            : ",\"max_tokens\":2048,\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":") ||
+    if (!request.append(",\"max_tokens\":") || !request.integer(maxTokens) ||
+        !request.append(streaming
+                            ? ",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":"
+                            : ",\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":") ||
         !request.quoted(prompt.view()) || !request.append("}]}"))
       return false;
   }
@@ -870,8 +872,15 @@ bool AiSentencePrefetchSession::launchBatch() {
   job->streaming = job->scope.url != gNonStreamingEndpoint;
   if (!job->streaming) LOG_INF("AI_PRE", "Using non-streaming compatibility mode for this endpoint");
   const bool endpointReady = buildUrl(job->url, job->scope.model, job->gemini, job->streaming);
+  // OpenCode Go advertises "none" (not "minimal") for hy4-flash-free.
+  // Keep the saved effort, foreground and all other models unchanged.
+  const bool fastHy4 = job->scope.model == "hy4-flash-free" && ai_endpoint::isOpenCodeGoUrl(job->url);
+  const std::string_view reasoningEffort =
+      fastHy4 ? std::string_view("none") : std::string_view(AI_TRANSLATION_STORE.getReasoningEffort());
+  // A single 4096-token request allows headroom if the gateway still emits reasoning.
+  const unsigned maxTokens = fastHy4 ? 4096u : 2048u;
   bool requestReady =
-      endpointReady && buildRequest(job->batch, job->gemini, job->streaming, job->scope.model,
+      endpointReady && buildRequest(job->batch, job->gemini, job->streaming, job->scope.model, reasoningEffort, maxTokens,
                                     reinterpret_cast<char*>(job->body.get()), MAX_BATCH_BODY, job->bodyBytes);
   while (!requestReady && job->batch.size() > 1 && endpointReady) {
     // A long paragraph may exceed the fixed request cap. Preserve FIFO
@@ -879,7 +888,7 @@ bool AiSentencePrefetchSession::launchBatch() {
     // 100-sentence lookahead window.
     batch_.insert(batch_.begin(), std::move(job->batch.back()));
     job->batch.pop_back();
-    requestReady = buildRequest(job->batch, job->gemini, job->streaming, job->scope.model,
+    requestReady = buildRequest(job->batch, job->gemini, job->streaming, job->scope.model, reasoningEffort, maxTokens,
                                 reinterpret_cast<char*>(job->body.get()), MAX_BATCH_BODY, job->bodyBytes);
   }
   if (!requestReady || !job->response.data || !job->framer || !trustedtime::trustedNow()) {
@@ -945,9 +954,10 @@ bool AiSentencePrefetchSession::launchBatch() {
   job->startedAt = millis();
   job->response.startedAt = job->startedAt;
   LOG_INF("AI_PRE",
-          "Batch started: count=%u mode=%s effort=%s header_timeout=%d idle_timeout=%d internal=%u largest=%u",
+          "Batch started: count=%u mode=%s effort=%.*s budget=%u header_timeout=%d idle_timeout=%d internal=%u largest=%u",
           static_cast<unsigned>(job->batch.size()), job->streaming ? "sse" : "json",
-          job->gemini ? "ignored-gemini" : AI_TRANSLATION_STORE.getReasoningEffort().c_str(), HTTP_TIMEOUT_MS,
+          static_cast<int>(job->gemini ? sizeof("ignored-gemini") - 1 : reasoningEffort.size()),
+           job->gemini ? "ignored-gemini" : reasoningEffort.data(), maxTokens, HTTP_TIMEOUT_MS,
           HTTP_READ_IDLE_TIMEOUT_MS,
           static_cast<unsigned>(HalMemory::getInternalHeap().freeBytes),
           static_cast<unsigned>(HalMemory::getInternalHeap().largestBlockBytes));
