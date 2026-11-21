@@ -11,6 +11,10 @@ header = (ROOT / "src/activities/reader/ClipSelectionActivity.h").read_text()
 word_box = "struct WordBox {" + header.split("struct WordBox {", 1)[1].split("  };", 1)[0] + "};"
 action_helpers = "\n".join(line for line in header.splitlines()
                            if "int firstAction() const" in line or "int actionCount() const" in line)
+assert "2 - firstAction()" in action_helpers
+_actions = source.split("constexpr ClippingResult::Action SELECTION_ACTIONS[]", 1)[1].split("};", 1)[0]
+assert "ClippingResult::Action::Lookup" in _actions and "ClippingResult::Action::Translate" in _actions
+assert "ClippingResult::Action::Clip" not in _actions and "ClippingResult::Action::Bookmark" not in _actions
 clean_word = "const char* cleanWordStart" + source.split("const char* cleanWordStart", 1)[1].split(
     "}  // namespace", 1
 )[0]
@@ -318,7 +322,7 @@ struct ClipSelectionActivity {
   int lastRenderedPageOffset = 0, lastRenderedSelected = 0, lastRenderedRangeStart = -1;
   int lastRenderedTextOffset = 0, lastRenderedTextXOffset = 0;
   bool buildSelectedText(int first, int last, std::string& text) const;
-  bool buildSentenceText(int anchor, std::string& text, uint32_t* sentenceStartOffset = nullptr) const;
+  bool buildSentenceText(int anchor, std::string& text, uint32_t* sentenceStartOffset = nullptr, uint16_t* wordOccurrence = nullptr) const;
   bool extractWords();
   void drawSelection() const;
   bool renderIncremental();
