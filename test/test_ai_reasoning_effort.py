@@ -38,8 +38,8 @@ assert "reasoningEffort: document.getElementById('ai-reasoning-effort').value" i
 assert "enableItemSave(this.closest(" in settings
 
 # Only OpenAI-compatible chat-completions get the extra top-level field.
-# Gemini remains unchanged; default sends nothing.
-assert 'if (config.getReasoningEffort() != "default") req["reasoning_effort"]' in foreground
+# Gemini remains unchanged; default sends nothing for non-Hy4 requests.
+assert 'if (strcmp(reasoningEffort, "default") != 0) req["reasoning_effort"] = reasoningEffort;' in foreground
 assert 'if (reasoningEffort != "default" &&' in prefetch
 assert 'request.append(",\\\"reasoning_effort\\\":")' in prefetch
 assert 'req["generationConfig"].to<JsonObject>()' in foreground
@@ -49,14 +49,17 @@ assert 'cfg.cert_pem = ai_translation::ROOTS;' in prefetch
 assert 'esp_http_client_perform(job.client)' in prefetch
 
 
-# Prefetch-only override for OpenCode Go hy4-flash-free. It supports none/high,
-# but not minimal. The saved preference and foreground request stay unchanged.
+# OpenCode Go hy4-flash-free uses none and 4096 in both paths, without
+# changing the persisted choice or the behavior of other endpoints.
 assert 'job->scope.model == "hy4-flash-free" && ai_endpoint::isOpenCodeGoUrl(job->url)' in prefetch
 assert 'fastHy4 ? std::string_view("none")' in prefetch
 assert 'fastHy4 ? 4096u : 2048u' in prefetch
 assert 'request.integer(maxTokens)' in prefetch
 assert 'effort=%.*s budget=%u' in prefetch
 assert 'job->gemini ? "ignored-gemini"' in prefetch
-assert 'req["max_tokens"] = ai_completion::maxOutputTokens(generationAttempt_);' in foreground
+assert 'const bool fastHy4 = config.getModel() == "hy4-flash-free" && ai_endpoint::isOpenCodeGoUrl(url);' in foreground
+assert 'const char* reasoningEffort = fastHy4 ? "none" : config.getReasoningEffort().c_str();' in foreground
+assert 'req["max_tokens"] = fastHy4 ? 4096u : ai_completion::maxOutputTokens(generationAttempt_);' in foreground
+assert 'LOG_INF("AI", "Reasoning effort: %s", gemini ? "ignored-gemini" : reasoningEffort);' in foreground
 
 print("AI reasoning-effort selector/persistence/request contracts passed")

@@ -426,6 +426,10 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
     if (!url.ends_with("/chat/completions")) url += "/chat/completions";
   }
 
+  // Match the already validated prefetch policy for this exact Go model.
+  const bool fastHy4 = config.getModel() == "hy4-flash-free" && ai_endpoint::isOpenCodeGoUrl(url);
+  const char* reasoningEffort = fastHy4 ? "none" : config.getReasoningEffort().c_str();
+
   const std::string prompt =
       "Translate the selected word in context and its complete source sentence into Russian. "
       "Output a single compact JSON object with exactly two string keys: "
@@ -441,10 +445,10 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
     req["generationConfig"].to<JsonObject>()["maxOutputTokens"] = ai_completion::maxOutputTokens(generationAttempt_);
   } else {
     req["model"] = config.getModel();
-    if (config.getReasoningEffort() != "default") req["reasoning_effort"] = config.getReasoningEffort();
+    if (strcmp(reasoningEffort, "default") != 0) req["reasoning_effort"] = reasoningEffort;
     // Chat-completions max_tokens includes hidden reasoning for some models.
     // Use a larger cap and retry once ONLY if finish_reason reports a limit.
-    req["max_tokens"] = ai_completion::maxOutputTokens(generationAttempt_);
+    req["max_tokens"] = fastHy4 ? 4096u : ai_completion::maxOutputTokens(generationAttempt_);
     JsonObject msg = req["messages"].to<JsonArray>().add<JsonObject>();
     msg["role"] = "user";
     msg["content"] = prompt;
@@ -464,7 +468,7 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
   const size_t hostEnd = url.find('/', hostStart);
   const std::string host =
       url.substr(hostStart, hostEnd == std::string::npos ? std::string::npos : hostEnd - hostStart);
-  LOG_INF("AI", "Reasoning effort: %s", gemini ? "ignored-gemini" : config.getReasoningEffort().c_str());
+  LOG_INF("AI", "Reasoning effort: %s", gemini ? "ignored-gemini" : reasoningEffort);
   LOG_INF("AI", "TLS connecting: host=%s free=%u largest=%u ca_bytes=%u", host.c_str(),
           static_cast<unsigned>(heap.freeBytes), static_cast<unsigned>(heap.largestBlockBytes),
           static_cast<unsigned>(sizeof(ai_translation::ROOTS) - 1));
