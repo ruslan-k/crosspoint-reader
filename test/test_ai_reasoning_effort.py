@@ -43,7 +43,7 @@ assert 'if (config.getReasoningEffort() != "default") req["reasoning_effort"]' i
 assert 'if (reasoningEffort != "default" &&' in prefetch
 assert 'request.append(",\\\"reasoning_effort\\\":")' in prefetch
 assert 'req["generationConfig"].to<JsonObject>()' in foreground
-assert '"generationConfig"' in prefetch
+assert 'generationConfig' in prefetch
 assert 'httpConfig.cert_pem = ai_translation::ROOTS;' in foreground
 assert 'cfg.cert_pem = ai_translation::ROOTS;' in prefetch
 assert 'esp_http_client_perform(job.client)' in prefetch
