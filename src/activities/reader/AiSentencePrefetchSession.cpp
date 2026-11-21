@@ -47,7 +47,7 @@ constexpr int HTTP_TIMEOUT_MS = 60000;
 // subsequent SSE read by an idle timeout and the remaining request budget.
 constexpr int HTTP_READ_IDLE_TIMEOUT_MS = 15000;
 constexpr uint32_t MIN_INTERNAL_IN_FLIGHT = 15 * 1024;
-// Cooperative client uses the existing Translate task stack, unlike the old worker.
+// Strict preflight before allocating a dedicated HTTPS worker.
 constexpr uint32_t MIN_INTERNAL_FREE = 94 * 1024;
 constexpr uint32_t MIN_INTERNAL_BLOCK = 36 * 1024;
 constexpr uint32_t MIN_PSRAM_FREE = 144 * 1024;
@@ -125,8 +125,6 @@ struct Response {
   size_t totalBytes = 0;
   uint32_t dataEvents = 0;
   uint32_t startedAt = 0;
-  bool connected = false;
-  bool headersSent = false;
   bool headersReceived = false;
   bool firstByte = false;
   bool firstFrame = false;
@@ -166,6 +164,12 @@ const char* httpResultName(esp_err_t result) {
       return "ESP_ERR_HTTP_CONNECT";
     case ESP_ERR_HTTP_WRITE_DATA:
       return "ESP_ERR_HTTP_WRITE_DATA";
+    case ESP_ERR_HTTP_CONNECTION_CLOSED:
+      return "ESP_ERR_HTTP_CONNECTION_CLOSED";
+    case ESP_ERR_HTTP_BASE + 11:
+      return "ESP_ERR_HTTP_READ_TIMEOUT";
+    case ESP_ERR_HTTP_BASE + 12:
+      return "ESP_ERR_HTTP_INCOMPLETE_DATA";
     default:
       return esp_err_to_name(result);
   }
@@ -181,13 +185,11 @@ esp_err_t onHttpEvent(esp_http_client_event_t* event) {
   }
   switch (event->event_id) {
     case HTTP_EVENT_ON_CONNECTED:
-      result->connected = true;
       result->phase = "fetch_headers";
       LOG_INF("AI_PRE", "Phase: connected elapsed_ms=%u", static_cast<unsigned>(millis() - result->startedAt));
       updateReadTimeout(*result, event->client, false);
       break;
     case HTTP_EVENT_HEADERS_SENT:
-      result->headersSent = true;
       LOG_INF("AI_PRE", "Phase: request_sent elapsed_ms=%u", static_cast<unsigned>(millis() - result->startedAt));
       updateReadTimeout(*result, event->client, false);
       break;
@@ -571,6 +573,8 @@ void AiSentencePrefetchSession::runBatch(void* data) {
       stopReason = "transport_error";
     } else if (status != 200) {
       stopReason = "http_status";
+    } else if (job.response.overflow) {
+      stopReason = "response_overflow";
     } else if (job.parseError) {
       stopReason = "parser_error";
     } else {
@@ -867,7 +871,7 @@ bool AiSentencePrefetchSession::launchBatch() {
 void AiSentencePrefetchSession::tick() {
   if (stopped_ || disabled_ || !section_) return;
   if (worker_) {
-    pollBatch();  // At most one bounded asynchronous HTTPS step per UI tick.
+    pollBatch();  // Only inspect worker completion; no HTTPS runs on the UI task.
     return;
   }
   if (WiFi.status() != WL_CONNECTED) return;
