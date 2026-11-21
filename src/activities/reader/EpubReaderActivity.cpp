@@ -26,10 +26,12 @@
 #include <limits>
 
 #include "../../util/BookmarkFile.h"
+#include "AITranslationStore.h"
 #include "AiSentenceTranslationActivity.h"
 #if defined(FREEINK_DEVICE_PICCO)
 #include "AiSentencePrefetchSession.h"
 #include "util/AiBookCache.h"
+#include "util/AiCacheServer.h"
 #endif
 #include "BookmarkEntry.h"
 #include "ChapterBuildGate.h"
@@ -245,6 +247,7 @@ ClipSelectionActivity::Selection lookupReturnSelectionFor(const ClippingResult& 
 EpubReaderActivity::~EpubReaderActivity() {
 #if defined(FREEINK_DEVICE_PICCO)
   stopBackgroundPrefetch("reader_destroyed");
+  ai_cache_server::cancel();
 #endif
   ImageBlock::setExtractor(nullptr, nullptr);
   // ActivityManager destroys activities with its RenderLock already held;
@@ -272,6 +275,7 @@ EpubReaderActivity::~EpubReaderActivity() {
 void EpubReaderActivity::onExit() {
 #if defined(FREEINK_DEVICE_PICCO)
   stopBackgroundPrefetch("reader_exit");
+  ai_cache_server::cancel();
 #endif
   ReaderActivity::onExit();
 }
@@ -279,6 +283,7 @@ void EpubReaderActivity::onExit() {
 void EpubReaderActivity::prepareForSleep() {
 #if defined(FREEINK_DEVICE_PICCO)
   stopBackgroundPrefetch("sleep");
+  ai_cache_server::cancel();
 #endif
   ReaderActivity::prepareForSleep();
   if (!epub || !KOREADER_STORE.getSyncOnSleep() || !KOREADER_STORE.hasCredentials()) return;
@@ -296,6 +301,12 @@ void EpubReaderActivity::prepareForSleep() {
 
 #if defined(FREEINK_DEVICE_PICCO)
 void EpubReaderActivity::stopBackgroundPrefetch(const char* reason, bool retainWifi) {
+  // When the server owns an in-flight request, transfer the reader's WiFi
+  // lease to it before a pending prefetch session can tear the radio down.
+  if (!retainWifi && backgroundWifiOwned_ && ai_cache_server::workerPending()) {
+    ai_cache_server::adoptWifi();
+    backgroundWifiOwned_ = false;
+  }
   bool deferredShutdown = false;
   if (backgroundPrefetch_) {
     const uint16_t used = backgroundPrefetch_->requestsStarted();
@@ -430,6 +441,13 @@ bool EpubReaderActivity::loadBook() {
   }
   epub = std::move(loadedEpub);
   vocabularyMetadata.reset();
+#if defined(FREEINK_DEVICE_PICCO)
+  // Start automatically for a missing whole-book package. No SHA scan or
+  // networking in this loading path; the idle worker handles both.
+  AI_TRANSLATION_STORE.loadFromFile();
+  if (ai_book_cache::needsServer(bookPath))
+    ai_cache_server::watch(bookPath, AI_TRANSLATION_STORE.getCacheServerUrl());
+#endif
 
   ImageBlock::clearRenderFailures();
   ImageBlock::setExtractor(epub.get(), [](void* ctx, const char* src, const char* dest) {
@@ -1243,6 +1261,10 @@ void EpubReaderActivity::loop() {
   if (!prevTriggered && !nextTriggered) {
     // Nothing to act on in this frame: build more of the chapter or prewarm ahead.
 #if defined(FREEINK_DEVICE_PICCO)
+    // Keep network work off the page-turn/input path and away from BLE heap.
+    if (!bleturner::holdsHeap() && !buttonContactClosed() && !anyButtonPressed() &&
+        pendingManualTurn == 0)
+      ai_cache_server::tick(backgroundPrefetch_ != nullptr);
     backgroundPrefetchTick();
 #endif
     if (!backgroundBuildTick()) {

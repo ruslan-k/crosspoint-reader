@@ -38,6 +38,7 @@
 #include <string_view>
 
 #include "AITranslationStore.h"
+#include "util/AiCacheServer.h"
 #include "ClippingStore.h"
 #include "CrossPointSettings.h"
 #include "FontInstaller.h"
@@ -1765,6 +1766,7 @@ void CrossPointWebServer::handleGetAiTranslation() const {
   doc["url"] = AI_TRANSLATION_STORE.getUrl();
   doc["model"] = AI_TRANSLATION_STORE.getModel();
   doc["reasoningEffort"] = AI_TRANSLATION_STORE.getReasoningEffort();
+  doc["ai_cache_server_url"] = AI_TRANSLATION_STORE.getCacheServerUrl();
   doc["hasKey"] = AI_TRANSLATION_STORE.hasKey();
   String response;
   serializeJson(doc, response);
@@ -1809,7 +1811,14 @@ void CrossPointWebServer::handlePostAiTranslation() {
     server->send(400, "text/plain", "Invalid reasoning effort");
     return;
   }
-  if (!AI_TRANSLATION_STORE.configure(url, model, key, replaceKey, reasoningEffort)) {
+  const std::string cacheServerUrl = doc["ai_cache_server_url"].is<const char*>()
+                                         ? doc["ai_cache_server_url"].as<const char*>()
+                                         : AI_TRANSLATION_STORE.getCacheServerUrl();
+  if (!ai_cache_server::validBaseUrl(cacheServerUrl)) {
+    server->send(400, "text/plain", "Invalid cache server base URL");
+    return;
+  }
+  if (!AI_TRANSLATION_STORE.configure(url, model, key, replaceKey, reasoningEffort, cacheServerUrl)) {
     server->send(500, "text/plain", "Could not save AI settings on SD card");
     return;
   }

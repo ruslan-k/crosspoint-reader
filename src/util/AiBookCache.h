@@ -29,6 +29,15 @@ Result lookup(const std::string& bookPath, std::string_view selectedWord,
 // In-memory hint only; never scans the SD card from a reader page-turn tick.
 // True only after validating the package header, index CRC, and EPUB SHA-256.
 bool knownComplete(const std::string& bookPath);
+// Cheap header hint for starting a background server job on book open.
+// Full validation still happens only in lookup()/validatePackage().
+bool needsServer(const std::string& bookPath);
+
+// Validate a downloaded candidate without touching the UI-only book digest hint.
+bool sha256File(const std::string& path, uint8_t digest[32]);
+bool validatePackage(const std::string& candidatePath, const uint8_t expectedBookSha[32], bool& complete);
+// Serialize package replacement with foreground lookup on the UI thread.
+bool installPackage(const std::string& candidatePath, const std::string& bookPath);
 const char* resultName(Result result);
 
 }  // namespace ai_book_cache

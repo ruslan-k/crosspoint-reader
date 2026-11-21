@@ -651,7 +651,7 @@
   }
 
   // --- Personal AI translation (no Linga account or service required) ---
-  let aiTranslation = {url: '', model: '', reasoningEffort: 'default', hasKey: false};
+  let aiTranslation = {url: '', model: '', reasoningEffort: 'default', ai_cache_server_url: '', hasKey: false};
   const aiEffortOptions = [
     ['default', 'Default (provider)'],
     ['low', 'Low'],
@@ -676,12 +676,15 @@
           '<span class="setting-control"><input type="password" id="ai-key" autocomplete="new-password" spellcheck="false" placeholder="' + (config.hasKey ? '(unchanged)' : 'Your API key') + '"></span></div>' +
         '<div class="setting-row"><span class="setting-name">AI Model</span>' +
           '<span class="setting-control"><input type="text" id="ai-model" spellcheck="false" value="' + escapeHtml(config.model || '') + '" placeholder="deepseek-v4.1-flash"></span></div>' +
+        '<div class="setting-row"><label class="setting-name" for="ai-cache-server-url">AI Cache Server URL</label>' +
+          '<span class="setting-control"><input type="url" id="ai-cache-server-url" spellcheck="false" value="' + escapeHtml(config.ai_cache_server_url || '') + '" placeholder="http://192.168.50.37:8791"></span></div>' +
         '<div class="setting-row"><label class="setting-name" for="ai-reasoning-effort">Reasoning effort</label>' +
           '<span class="setting-control"><select id="ai-reasoning-effort" onchange="enableItemSave(this.closest(\'.item-box\'))">' +
           effortOptions + '</select></span></div>' +
         '<label style="display:flex;align-items:center;gap:8px;margin-top:8px;"><input type="checkbox" id="ai-clear-key"> Remove saved API key</label>' +
         '<div class="item-actions"><button class="btn-small btn-save-server" onclick="saveAiTranslation()" disabled>Save</button></div>' +
       '</div>' +
+      '<p style="color:var(--label-color);font-size:0.9em;">AI Cache Server is optional (empty = disabled). It uploads the current EPUB and downloads verified .aic snapshots in the background. Use a trusted LAN or Tailscale-reachable address; plain HTTP sends book contents unencrypted.</p>' +
       '<p style="color:var(--label-color);font-size:0.9em;">Reasoning effort applies to OpenAI-compatible API calls (including foreground translation and prefetch). Default omits the field. Gemini uses a different API and ignores this setting; unsupported models/providers may reject non-default values.</p>' +
       '<p style="color:var(--label-color);font-size:0.9em;">Examples: Gemini URL https://generativelanguage.googleapis.com/v1beta and model gemini-2.5-flash; Groq URL https://api.groq.com/openai/v1 and model openai/gpt-oss-20b; OpenCode Go URL https://opencode.ai/inference/go/openai/v1 and model deepseek-v4.1-flash. Older OpenCode Go URLs are automatically migrated during translation. The model must be available under the Go subscription (for example, hy4-flash-free or deepseek-v4.1-flash). The API key is not returned by this page. The web UI uses local HTTP on your local network; use trusted Wi-Fi only.</p>' +
       '</div>';
@@ -705,7 +708,8 @@
     btn.disabled = true;
     const data = {url: document.getElementById('ai-url').value.trim(),
                   model: document.getElementById('ai-model').value.trim(),
-                  reasoningEffort: document.getElementById('ai-reasoning-effort').value};
+                  reasoningEffort: document.getElementById('ai-reasoning-effort').value,
+                  ai_cache_server_url: document.getElementById('ai-cache-server-url').value.trim()};
     const key = document.getElementById('ai-key').value.trim();
     if (document.getElementById('ai-clear-key').checked) data.clearKey = true;
     else if (key) data.apiKey = key;

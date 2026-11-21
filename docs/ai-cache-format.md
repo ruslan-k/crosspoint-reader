@@ -4,6 +4,38 @@ This is the contract between the external Python generator and the Picco firmwar
 The generator is intentionally not implemented here. Files are **plaintext** and
 contain portions of the book and AI translations. Keep your microSD private.
 
+## Automatic cache-server client (Picco)
+
+In the web UI's **AI Translation** section, set **AI Cache Server URL** to a
+trusted server, for example `http://192.168.50.37:8791` or a Tailscale-reachable
+IP/hostname. Empty (the default) disables the feature. The URL is stored as
+`ai_cache_server_url` in `/.crosspoint/ai-translation.json`. The Cache Server
+does not use the device's BYOK credentials.
+
+When a book is opened without a COMPLETE package, a low-priority worker checks
+`GET /api/cache/status?sha=<64 lowercase EPUB SHA-256>`. If the server reports
+`missing`, it uploads the original EPUB as multipart `file` and `sha` to
+`POST /api/cache/job`. It polls status about every 15 seconds, downloads
+snapshots from `GET /api/cache/download?sha=...` when progress increases or
+the job is ready, checks the binary header and index CRC and EPUB book digest,
+then replaces `<exact EPUB path>.aic` via an SD-card temporary file
+`<exact EPUB path>.aic.part`. A new Translate lookup can immediately use the
+new package; an already open popup checks for a newly installed snapshot too.
+The reader remains usable while requests run on a separate worker.
+
+All operations are best-effort: network errors stop the current attempt without
+disabling existing foreground translation or position-based prefetch. Reopen the
+book/Translate to retry. The firmware only knows one configurable base URL;
+Tailscale routing, server hosting and EPUB translation are host responsibilities.
+No automatic discovery and no retry across several server addresses are provided.
+Use HTTPS for transmission confidentiality where supported; plain HTTP sends
+the EPUB and package unencrypted.
+
+Logs under `[AI_SRV]`: `disabled`, `job queued sha=...`,
+`progress done/total`, `downloaded bytes=... complete=0/1`, and
+`error: reason`. No book text or API key is logged. An incomplete .aic
+snapshot is usable, but only validated sentence/word records are returned.
+
 ## Install and lifecycle
 
 Put **one** complete package alongside the EPUB, as

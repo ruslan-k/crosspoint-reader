@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <iterator>
 #include <new>
 #include <string>
 #include <string_view>
@@ -35,6 +36,7 @@
 #include "util/AiApiEndpoint.h"
 #include "util/AiBoundedJsonWriter.h"
 #include "util/AiCompletionPolicy.h"
+#include "util/AiHttpWorkerGate.h"
 #include "util/AiPrefetchStream.h"
 #include "util/AiSentenceUtils.h"
 #include "util/AiTranslationRoots.h"
@@ -687,6 +689,7 @@ void AiSentencePrefetchSession::runBatch(void* data) {
   // is released by vTaskDeleteWithCaps immediately afterwards.
   holder.reset();
   gPrefetchTaskBusy.store(false, std::memory_order_release);
+  ai_http_gate::release();
   vTaskDeleteWithCaps(nullptr);
 }
 
@@ -736,7 +739,7 @@ bool AiSentencePrefetchSession::finished() const {
 }
 
 bool AiSentencePrefetchSession::httpWorkerBusy() {
-  return gPrefetchTaskBusy.load(std::memory_order_acquire);
+  return ai_http_gate::busy();
 }
 
 bool AiSentencePrefetchSession::cancel(bool shutdownWifi) {
@@ -885,7 +888,7 @@ bool AiSentencePrefetchSession::launchBatch() {
   pageTokens_.clear();
   std::vector<Token>().swap(pageTokens_);
   tokenIndex_ = 0;
-  if (gPrefetchTaskBusy.load(std::memory_order_acquire)) return false;
+  if (gPrefetchTaskBusy.load(std::memory_order_acquire) || ai_http_gate::busy()) return false;
   if (!memoryReady()) {
     if (!reportedMemoryPause_) {
       const auto mem = HalMemory::getInternalHeap();
@@ -999,6 +1002,12 @@ bool AiSentencePrefetchSession::launchBatch() {
   // when the popup is closed and reopened quickly.
   bool wasBusy = false;
   if (!gPrefetchTaskBusy.compare_exchange_strong(wasBusy, true, std::memory_order_acq_rel)) return false;
+  if (!ai_http_gate::acquire()) {
+    batch_.insert(batch_.begin(), std::make_move_iterator(job->batch.begin()),
+                  std::make_move_iterator(job->batch.end()));
+    gPrefetchTaskBusy.store(false, std::memory_order_release);
+    return false;
+  }
   std::shared_ptr<Job> shared = std::move(job);
   if (shared->streaming) {
     shared->response.onDataContext = shared.get();
@@ -1010,6 +1019,7 @@ bool AiSentencePrefetchSession::launchBatch() {
                           tskIDLE_PRIORITY + 1, nullptr, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
     delete argument;
     gPrefetchTaskBusy.store(false, std::memory_order_release);
+    ai_http_gate::release();
     LOG_INF("AI_PRE", "Cannot create PSRAM HTTPS worker; prefetch disabled safely");
     disabled_ = true;
     return false;

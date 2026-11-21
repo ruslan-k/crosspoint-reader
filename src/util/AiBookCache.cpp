@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <string_view>
 
@@ -61,6 +62,9 @@ struct RecentBook {
 // Accessed on the UI task only, including from the reader's background tick.
 // A book file edit with unchanged size and FAT mtime may require a reboot.
 RecentBook recent;
+// Atomic package publication relative to on-device lookup. Do not hold this
+// while downloading or validating .part; those run independently on the worker.
+std::mutex packageMutex;
 
 uint16_t le16(const uint8_t* p) {
   return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
@@ -309,6 +313,38 @@ ReadStatus readRecord(HalFile& file, const Index& index, std::string_view source
 
 }  // namespace
 
+bool sha256File(const std::string& path, uint8_t digest[32]) {
+  uint8_t raw[32]{};
+  if (!sha256Book(path, raw)) return false;
+  memcpy(digest, raw, sizeof(raw));
+  return true;
+}
+
+bool validatePackage(const std::string& candidatePath, const uint8_t expectedBookSha[32], bool& complete) {
+  complete = false;
+  HalFile file;
+  if (!Storage.openFileForRead("AI_SRV", candidatePath, file) || file.isDirectory()) return false;
+  Header header;
+  if (!parseHeader(file, header) || memcmp(header.bookSha, expectedBookSha, 32) != 0) return false;
+  complete = (header.flags & FLAG_COMPLETE) != 0;
+  return true;
+}
+
+bool needsServer(const std::string& bookPath) {
+  std::lock_guard<std::mutex> guard(packageMutex);
+  HalFile file;
+  if (!Storage.openFileForRead("AI_SRV", bookPath + ".aic", file) || file.isDirectory()) return true;
+  uint8_t prefix[16]{};
+  if (!readAt(file, 0, prefix, sizeof(prefix))) return true;
+  return memcmp(prefix, MAGIC, sizeof(MAGIC)) != 0 || le32(prefix + 8) != VERSION ||
+         (le32(prefix + 12) & FLAG_COMPLETE) == 0;
+}
+
+bool installPackage(const std::string& candidatePath, const std::string& bookPath) {
+  std::lock_guard<std::mutex> guard(packageMutex);
+  return Storage.replaceFile(candidatePath.c_str(), (bookPath + ".aic").c_str());
+}
+
 bool knownComplete(const std::string& bookPath) {
   return recent.hashed && recent.complete && recent.path == bookPath;
 }
@@ -330,6 +366,7 @@ const char* resultName(Result result) {
 Result lookup(const std::string& bookPath, std::string_view selectedWord, std::string_view sentence,
               uint16_t wordOccurrence, std::string& translatedWord,
               std::string& translatedSentence, bool& complete) {
+  std::lock_guard<std::mutex> guard(packageMutex);
   complete = false;
   translatedWord.clear();
   translatedSentence.clear();

@@ -29,7 +29,7 @@ assert "validReasoningEffort(effort) ? effort : \"default\"" in store_c
 assert 'doc["reasoningEffort"] = AI_TRANSLATION_STORE.getReasoningEffort();' in server
 assert 'AITranslationStore::validReasoningEffort(reasoningEffort)' in server
 assert 'AI_TRANSLATION_STORE.getReasoningEffort();' in server
-assert 'configure(url, model, key, replaceKey, reasoningEffort)' in server
+assert 'configure(url, model, key, replaceKey, reasoningEffort, cacheServerUrl)' in server
 
 # Web settings display the saved value and send it on explicit Save.
 assert 'id="ai-reasoning-effort"' in settings

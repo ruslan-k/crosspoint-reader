@@ -30,6 +30,7 @@
 #include "fontIds.h"
 #include "util/AiApiEndpoint.h"
 #include "util/AiBookCache.h"
+#include "util/AiCacheServer.h"
 #include "util/AiCompletionPolicy.h"
 #include "util/AiTranslationCache.h"
 #include "util/AiTranslationRoots.h"
@@ -338,13 +339,21 @@ void AiSentenceTranslationActivity::onEnter() {
                             cachedWord, cachedSentence, complete);
   fullBookCache_ = complete;
   if (packageResult == ai_book_cache::Result::Hit) {
+    if (!complete && AI_TRANSLATION_STORE.loadFromFile())
+      ai_cache_server::watch(bookPath_, AI_TRANSLATION_STORE.getCacheServerUrl());
     LOG_INF("AI_CACHE", "Book package cache hit");
     openResult(std::move(cachedWord), std::move(cachedSentence));
     return;
   }
   LOG_INF("AI_CACHE", "Book package miss: %s", ai_book_cache::resultName(packageResult));
 #endif
-  if (!AI_TRANSLATION_STORE.loadFromFile() || !AI_TRANSLATION_STORE.configured()) {
+  const bool settingsLoaded = AI_TRANSLATION_STORE.loadFromFile();
+#if defined(FREEINK_DEVICE_PICCO)
+  // A package miss can be repaired without a BYOK key: the server owns its
+  // separate model and publishes verified .aic snapshots as they appear.
+  if (!fullBookCache_) ai_cache_server::watch(bookPath_, settingsLoaded ? AI_TRANSLATION_STORE.getCacheServerUrl() : "");
+#endif
+  if (!settingsLoaded || !AI_TRANSLATION_STORE.configured()) {
     fail(tr(STR_AI_NOT_CONFIGURED));
     return;
   }
@@ -690,6 +699,25 @@ void AiSentenceTranslationActivity::loop() {
     finish();
     return;
   }
+#if defined(FREEINK_DEVICE_PICCO)
+  if (state_ == State::Showing || state_ == State::Error) {
+    ai_cache_server::tick(prefetch_ != nullptr);
+    if (ai_cache_server::takeUpdated(bookPath_)) {
+      bool complete = false;
+      std::string freshWord, freshSentence;
+      if (ai_book_cache::lookup(bookPath_, word_, sentence_, origin_.wordOccurrence,
+                                freshWord, freshSentence, complete) == ai_book_cache::Result::Hit) {
+        fullBookCache_ = complete;
+        if (complete && prefetch_) {
+          prefetch_->cancel(false);
+          prefetch_.reset();
+        }
+        LOG_INF("AI_CACHE", "Book package cache hit");
+        openResult(std::move(freshWord), std::move(freshSentence));
+      }
+    }
+  }
+#endif
   if (state_ == State::Showing) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
       finish();
@@ -733,6 +761,7 @@ void AiSentenceTranslationActivity::loop() {
 #if defined(FREEINK_DEVICE_PICCO)
   // A previous background POST may still be finishing after cancellation.
   // Never allocate a second mbedTLS client until its cleanup is complete.
+  ai_cache_server::pauseForForeground();
   if (AiSentencePrefetchSession::httpWorkerBusy()) {
     if (!waitingForBackground_) LOG_INF("AI_BG", "Foreground waiting for previous HTTPS worker");
     waitingForBackground_ = true;
@@ -799,6 +828,12 @@ void AiSentenceTranslationActivity::onExit() {
   if (prefetch_ && onHandoff_) {
     onHandoff_(std::move(prefetch_), wifiOwned_);
     wifiOwned_ = false;  // WiFi lease transferred to the reader as well.
+  }
+  // Transfer the radio lease before requesting any worker teardown. A
+  // prefetch cancellation must not switch WiFi off under the cache server.
+  if (wifiOwned_ && ai_cache_server::workerPending()) {
+    ai_cache_server::adoptWifi();
+    wifiOwned_ = false;
   }
   const bool deferredWifiShutdown = prefetch_ && prefetch_->cancel(wifiOwned_);
   prefetch_.reset();
