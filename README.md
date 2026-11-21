@@ -27,6 +27,8 @@ Check [our Devices page](https://crosspointreader.com/devices) for the full list
 
 - **Screenshots.**
 
+- **AI sentence translation**: tap a word to translate its whole sentence into Russian. BYOK providers translate on demand; on Picco an optional host-side [AI Cache Server](#ai-sentence-translation-and-cache-server) can pre-translate a whole EPUB into an indexed `.aic` package. See [AI translation](./docs/ai-translation.md).
+
 - **Custom fonts**: install your favorite fonts on the SD card.
 
 - **Tilt page turn (X3 and Sticky)**.
@@ -152,11 +154,29 @@ Conversion runs the firmware repo's `lib/EpdFont/scripts/fontconvert_sdcard.py` 
 
 ---
 
+## AI sentence translation and cache server
+
+**Translate** is sentence-level: select any word and the popup shows the original sentence and its Russian translation. Results are cached, so repeated lookups of the same sentence are instant. BYOK works per sentence; Picco can additionally use an indexed `.epub.aic` package produced on a host by the optional [AI Cache Server](./server/README.md).
+
+Run the server on a host that has the `hermes` CLI available:
+
+```bash
+cd server
+python3 cache_server.py
+```
+
+Then set **AI Cache Server URL** in the device web UI to `http://<host>:8791`. The whole-book job is resumable and publishes snapshots while it runs. Details, API and verification: [server/README.md](./server/README.md), [docs/ai-translation.md](./docs/ai-translation.md).
+
+---
+
 ## Documentation
 
 - [User Guide](./USER_GUIDE.md)
 - [Web server usage](./docs/webserver.md)
 - [Web server endpoints](./docs/webserver-endpoints.md)
+- [AI sentence translation](./docs/ai-translation.md)
+- [AI cache format](./docs/ai-cache-format.md)
+- [AI Cache Server](./server/README.md)
 - [Project scope](./SCOPE.md)
 - [Contributing docs](./docs/contributing/README.md)
 - [Touch and UI development](./docs/contributing/touch-and-ui.md) - how to build new screens on the FreeInkUI activity bases (UiListActivity and friends), plus build envs for the non-Xteink touch devices

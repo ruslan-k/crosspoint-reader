@@ -45,11 +45,10 @@ checkpoint guards remain in force.
 
 ## CrossPoint AI Cache Server
 
-The optional server can translate an entire EPUB and publish .aic snapshots
-while the user reads. The CPAICPK1 binary format remains unchanged:
-the host should produce word_count=0 records and mark COMPLETE only when
-**all extracted sentences** have been translated. Existing packages
-containing word entries remain usable. See [ai-cache-format.md](ai-cache-format.md).
+The server implementation lives in [server/](../server/README.md). It translates an entire EPUB on a host and publishes CPAICPK1 `.aic` snapshots while the user reads. The binary format remains unchanged: the host produces word_count=0 records and marks COMPLETE only when **all extracted sentences** have been translated. Existing packages containing word entries remain usable. See [ai-cache-format.md](ai-cache-format.md).
 
-Sentence boundaries must still exactly match the reader's extraction,
-including punctuation and its byte-only whitespace normalization.
+Sentence boundaries must still exactly match the reader's extraction, including punctuation and its byte-only whitespace normalization.
+
+The host groups sentences into NDJSON batches. Besides `id`, each sentence carries a short `key` that the model must echo; the server accepts a line only when the key matches the expected sentence and all batch ids are present exactly once, otherwise it retries. This prevents a model numbering error from shifting translations onto neighbouring sentences — the failure seen at `idx=1906` in the earlier 4073-sentence cache. Changing `reasoning effort` does not prevent it, and the strict check does not change the `.aic` format.
+
+Set **AI Cache Server URL** in the device web UI to `http://<host>:8791`; the API, environment variables, resumability and verification commands are documented in the [server README](../server/README.md).
