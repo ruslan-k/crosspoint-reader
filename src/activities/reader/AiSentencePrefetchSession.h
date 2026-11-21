@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -14,9 +15,9 @@ class Page;
 class Section;
 class TextBlock;
 
-// Owned by the Translate popup. EPUB extraction runs in short UI ticks;
-// blocking HTTPS runs only in a dedicated PSRAM worker. A global busy gate
-// keeps BLE/WiFi teardown out of the active worker's TLS lifetime.
+// Owned by Translate while visible, then optionally transferred to its EPUB
+// reader. EPUB extraction runs in short UI ticks; blocking HTTPS runs only in
+// a dedicated PSRAM worker, behind the shared BLE/WiFi teardown gate.
 class AiSentencePrefetchSession {
  public:
   AiSentencePrefetchSession(ai_prefetch::Scope scope, Section* section, uint32_t spine, int firstPage,
@@ -24,6 +25,15 @@ class AiSentencePrefetchSession {
   ~AiSentencePrefetchSession();
 
   void tick();
+  // After popup closure, validate the live Section while holding RenderLock::Try.
+  // This avoids dereferencing a stale EPUB pointer across reflow/page changes.
+  void runInBackground(std::function<bool()> sectionStillLive, uint16_t requestLimit,
+                       uint32_t lastBookBatchAt);
+  bool finished() const;
+  bool workerPending() const { return static_cast<bool>(worker_); }
+  uint16_t requestsStarted() const { return requestsStarted_; }
+  uint16_t savedSentences() const { return savedSentences_; }
+  uint32_t lastBatchStartedAt() const { return lastBatchAt_; }
   // Returns true if the worker took ownership of a requested WiFi shutdown.
   bool cancel(bool shutdownWifi = false);
   // Safe to query from the reader's BLE policy without an activity pointer.
@@ -62,6 +72,12 @@ class AiSentencePrefetchSession {
   bool droppedSentence_ = false;
   bool stopped_ = false;
   bool reportedMemoryPause_ = false;
+  bool backgroundMode_ = false;
+  uint16_t requestsStarted_ = 0;
+  uint16_t maxRequests_ = 25;  // Up to the existing 100-sentence window in Translate.
+  uint16_t savedSentences_ = 0;
+  uint32_t lastBatchAt_ = 0;
+  std::function<bool()> sectionStillLive_;
   std::vector<Token> pageTokens_;
   size_t tokenIndex_ = 0;
   ai_prefetch::Sentence current_;

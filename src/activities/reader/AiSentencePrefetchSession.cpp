@@ -34,6 +34,7 @@
 #include "clippings/ClippingText.h"
 #include "util/AiApiEndpoint.h"
 #include "util/AiBoundedJsonWriter.h"
+#include "util/AiCompletionPolicy.h"
 #include "util/AiPrefetchStream.h"
 #include "util/AiSentenceUtils.h"
 #include "util/AiTranslationRoots.h"
@@ -54,6 +55,7 @@ constexpr uint32_t MIN_INTERNAL_BLOCK = 36 * 1024;
 constexpr uint32_t MIN_PSRAM_FREE = 144 * 1024;
 constexpr uint32_t MIN_PSRAM_BLOCK = 64 * 1024;
 constexpr size_t TOKENS_PER_TICK = 48;
+constexpr uint32_t BACKGROUND_MIN_BATCH_INTERVAL_MS = 25000;
 constexpr size_t MAX_PAGE_TOKENS = 320;
 constexpr size_t SSE_LINE_CAP = 8 * 1024;
 constexpr size_t JSON_OBJECT_CAP = 24 * 1024;
@@ -689,14 +691,20 @@ void AiSentencePrefetchSession::runBatch(void* data) {
 }
 
 void AiSentencePrefetchSession::pollBatch() {
-  if (!worker_ || !worker_->done.load(std::memory_order_acquire)) return;
+  // done is published just before the worker's deferred WiFi handoff and
+  // PSRAM cleanup. Keep the job attached until the global HTTPS lease clears,
+  // so a reader exit cannot lose the worker responsible for radio teardown.
+  if (!worker_ || !worker_->done.load(std::memory_order_acquire) ||
+      gPrefetchTaskBusy.load(std::memory_order_acquire))
+    return;
   const bool complete = worker_->savedCount == worker_->batch.size();
+  savedSentences_ += static_cast<uint16_t>(worker_->savedCount);
   if (!complete && worker_->streaming && worker_->sseFrames > 0 && worker_->savedCount == 0) {
     gNonStreamingEndpoint = worker_->scope.url;
     LOG_INF("AI_PRE", "No usable JSON objects in SSE; next batch uses ordinary JSON");
   }
   worker_.reset();
-  if (!complete) disabled_ = true;  // No retry storm within this popup.
+  if (!complete) disabled_ = true;  // No retry storm within this session.
 }
 
 AiSentencePrefetchSession::AiSentencePrefetchSession(ai_prefetch::Scope scope, Section* section, uint32_t spine,
@@ -713,6 +721,19 @@ AiSentencePrefetchSession::AiSentencePrefetchSession(ai_prefetch::Scope scope, S
 }
 
 AiSentencePrefetchSession::~AiSentencePrefetchSession() { cancel(); }
+
+void AiSentencePrefetchSession::runInBackground(std::function<bool()> sectionStillLive,
+                                                uint16_t requestLimit, uint32_t lastBookBatchAt) {
+  sectionStillLive_ = std::move(sectionStillLive);
+  maxRequests_ = requestLimit;
+  if (lastBatchAt_ == 0) lastBatchAt_ = lastBookBatchAt;
+  backgroundMode_ = true;
+}
+
+bool AiSentencePrefetchSession::finished() const {
+  return !worker_ && (disabled_ || stopped_ || requestsStarted_ >= maxRequests_ ||
+                      ((scanEnded_ || considered_ >= ai_prefetch::WINDOW_SENTENCES) && batch_.empty()));
+}
 
 bool AiSentencePrefetchSession::httpWorkerBusy() {
   return gPrefetchTaskBusy.load(std::memory_order_acquire);
@@ -738,14 +759,19 @@ bool AiSentencePrefetchSession::cancel(bool shutdownWifi) {
 }
 
 bool AiSentencePrefetchSession::openPage() {
-  if (!section_ || nextPage_ >= static_cast<int>(section_->pageCount)) {
+  if (!section_ || !memoryReady()) return false;
+  RenderLock lock(RenderLock::Mode::Try);
+  if (!lock.ownsLock()) return false;
+  if (sectionStillLive_ && !sectionStillLive_()) {
+    disabled_ = true;
+    LOG_INF("AI_BG", "Stop: reader section changed during scan");
+    return false;
+  }
+  if (nextPage_ >= static_cast<int>(section_->pageCount)) {
     scanEnded_ = true;  // Never build EPUB pages merely for AI.
     LOG_INF("AI_PRE", "Lookahead ended: available pages exhausted, scanned=%u", static_cast<unsigned>(considered_));
     return false;
   }
-  if (!memoryReady()) return false;
-  RenderLock lock(RenderLock::Mode::Try);
-  if (!lock.ownsLock()) return false;
   auto page = section_->loadPage(nextPage_);
   if (!page) {
     scanEnded_ = true;
@@ -843,6 +869,15 @@ void AiSentencePrefetchSession::finishScan() {
 
 bool AiSentencePrefetchSession::launchBatch() {
   if (batch_.empty()) return false;
+  if (requestsStarted_ >= maxRequests_) {
+    disabled_ = true;
+    LOG_INF("AI_BG", "Budget reached: requests=%u saved=%u",
+            static_cast<unsigned>(requestsStarted_), static_cast<unsigned>(savedSentences_));
+    return false;
+  }
+  if (backgroundMode_ && lastBatchAt_ != 0 &&
+      static_cast<uint32_t>(millis() - lastBatchAt_) < BACKGROUND_MIN_BATCH_INTERVAL_MS)
+    return false;
   // Do not retain a full EPUB page token list while mbedTLS is allocating its
   // internal buffers. The next Translate tick may safely reload this SAME
   // prepared page and skip already-consumed source offsets after the batch.
@@ -872,11 +907,9 @@ bool AiSentencePrefetchSession::launchBatch() {
   job->streaming = job->scope.url != gNonStreamingEndpoint;
   if (!job->streaming) LOG_INF("AI_PRE", "Using non-streaming compatibility mode for this endpoint");
   const bool endpointReady = buildUrl(job->url, job->scope.model, job->gemini, job->streaming);
-  // OpenCode Go advertises "none" (not "minimal") for hy4-flash-free.
-  // Keep the saved effort, foreground and all other models unchanged.
-  const bool fastHy4 = job->scope.model == "hy4-flash-free" && ai_endpoint::isOpenCodeGoUrl(job->url);
+  const bool fastHy4 = ai_completion::isHy4Go(job->scope.model, job->url);
   const std::string_view reasoningEffort =
-      fastHy4 ? std::string_view("none") : std::string_view(AI_TRANSLATION_STORE.getReasoningEffort());
+      ai_completion::reasoningEffort(job->scope.model, job->url, AI_TRANSLATION_STORE.getReasoningEffort());
   // A single 4096-token request allows headroom if the gateway still emits reasoning.
   const unsigned maxTokens = fastHy4 ? 4096u : 2048u;
   bool requestReady =
@@ -982,6 +1015,8 @@ bool AiSentencePrefetchSession::launchBatch() {
     return false;
   }
   worker_ = std::move(shared);
+  ++requestsStarted_;
+  lastBatchAt_ = millis();
   return true;
 }
 

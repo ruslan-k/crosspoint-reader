@@ -26,6 +26,9 @@
 
 #include "../../util/BookmarkFile.h"
 #include "AiSentenceTranslationActivity.h"
+#if defined(FREEINK_DEVICE_PICCO)
+#include "AiSentencePrefetchSession.h"
+#endif
 #include "BookmarkEntry.h"
 #include "ChapterBuildGate.h"
 #include "ClipSelectionActivity.h"
@@ -226,6 +229,9 @@ ClipSelectionActivity::Selection lookupReturnSelectionFor(const ClippingResult& 
 }  // namespace
 
 EpubReaderActivity::~EpubReaderActivity() {
+#if defined(FREEINK_DEVICE_PICCO)
+  stopBackgroundPrefetch("reader_destroyed");
+#endif
   ImageBlock::setExtractor(nullptr, nullptr);
   // ActivityManager destroys activities with its RenderLock already held;
   // taking another here self-deadlocks (renderingMutex is non-recursive).
@@ -248,6 +254,124 @@ EpubReaderActivity::~EpubReaderActivity() {
     epub.reset();
   }
 }
+
+void EpubReaderActivity::onExit() {
+#if defined(FREEINK_DEVICE_PICCO)
+  stopBackgroundPrefetch("reader_exit");
+#endif
+  ReaderActivity::onExit();
+}
+
+void EpubReaderActivity::prepareForSleep() {
+#if defined(FREEINK_DEVICE_PICCO)
+  stopBackgroundPrefetch("sleep");
+#endif
+  ReaderActivity::prepareForSleep();
+}
+
+#if defined(FREEINK_DEVICE_PICCO)
+void EpubReaderActivity::stopBackgroundPrefetch(const char* reason, bool retainWifi) {
+  bool deferredShutdown = false;
+  if (backgroundPrefetch_) {
+    const uint16_t used = backgroundPrefetch_->requestsStarted();
+    if (backgroundPrefetch_->lastBatchStartedAt() != 0)
+      backgroundLastBatchAt_ = backgroundPrefetch_->lastBatchStartedAt();
+    backgroundRequestsUsed_ = static_cast<uint16_t>(
+        std::min<unsigned>(MAX_AI_BACKGROUND_BATCHES, backgroundRequestsUsed_ + used));
+    LOG_INF("AI_BG", "Stop: reason=%s requests=%u saved=%u book_requests=%u", reason,
+            static_cast<unsigned>(used), static_cast<unsigned>(backgroundPrefetch_->savedSentences()),
+            static_cast<unsigned>(backgroundRequestsUsed_));
+    deferredShutdown = backgroundPrefetch_->cancel(backgroundWifiOwned_ && !retainWifi);
+    backgroundPrefetch_.reset();
+    backgroundPrefetchSection_ = nullptr;
+  }
+  if (!retainWifi && backgroundWifiOwned_) {
+    if (!deferredShutdown && !AiSentencePrefetchSession::httpWorkerBusy()) {
+      WiFi.disconnect(false);
+      WiFi.mode(WIFI_OFF);
+      LOG_INF("AI_BG", "WiFi stopped after background session");
+    } else if (!deferredShutdown) {
+      // An in-flight HTTPS worker still owns TLS. Do not tear down its radio.
+      LOG_INF("AI_BG", "WiFi shutdown deferred: HTTPS worker busy");
+    }
+    backgroundWifiOwned_ = false;
+  }
+}
+
+void EpubReaderActivity::adoptBackgroundPrefetch(std::unique_ptr<AiSentencePrefetchSession> session,
+                                                 bool ownsWifi, Section* sourceSection, uint32_t sourceSpine) {
+  if (!session) return;
+  // A cached popup can close while the previous packet is still in flight.
+  // Keep the old session and its radio lease in that case; never detach TLS.
+  if (backgroundPrefetch_ && AiSentencePrefetchSession::httpWorkerBusy()) {
+    LOG_INF("AI_BG", "Reanchor skipped: previous HTTPS worker still active");
+    backgroundWifiOwned_ = backgroundWifiOwned_ || ownsWifi;
+    session->cancel(false);  // Reader retains the only radio lease.
+    return;
+  }
+  if (backgroundPrefetch_) stopBackgroundPrefetch("reanchor", true);
+  backgroundWifiOwned_ = backgroundWifiOwned_ || ownsWifi;
+  backgroundPrefetchSection_ = sourceSection;
+  backgroundPrefetchSpine_ = sourceSpine;
+  backgroundPrefetch_ = std::move(session);
+  if (!section || section.get() != sourceSection || currentSpineIndex != static_cast<int>(sourceSpine)) {
+    stopBackgroundPrefetch("stale_anchor");
+    return;
+  }
+  if (backgroundRequestsUsed_ + backgroundPrefetch_->requestsStarted() >= MAX_AI_BACKGROUND_BATCHES) {
+    stopBackgroundPrefetch("book_budget");
+    return;
+  }
+  backgroundPrefetch_->runInBackground(
+      [this, sourceSection, sourceSpine] {
+        return section.get() == sourceSection && currentSpineIndex == static_cast<int>(sourceSpine);
+      }, MAX_AI_BACKGROUND_BATCHES - backgroundRequestsUsed_, backgroundLastBatchAt_);
+  LOG_INF("AI_BG", "Start: spine=%u requests=%u/%u wifi_owned=%u interval_ms=25000",
+          static_cast<unsigned>(sourceSpine), static_cast<unsigned>(backgroundRequestsUsed_),
+          static_cast<unsigned>(MAX_AI_BACKGROUND_BATCHES), backgroundWifiOwned_ ? 1u : 0u);
+}
+
+void EpubReaderActivity::backgroundPrefetchTick() {
+  if (!backgroundPrefetch_) return;
+  if (!section || section.get() != backgroundPrefetchSection_ ||
+      currentSpineIndex != static_cast<int>(backgroundPrefetchSpine_)) {
+    stopBackgroundPrefetch("section_changed");
+    return;
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    stopBackgroundPrefetch("wifi_down");
+    return;
+  }
+  // Always drain a finished worker, even when chapter indexing is running.
+  // This releases the large PSRAM response before the next reader build step.
+  if (backgroundPrefetch_->workerPending()) {
+    backgroundPrefetch_->tick();  // Only polls completion while workerPending().
+    if (backgroundPrefetch_->finished()) stopBackgroundPrefetch("complete_or_limit");
+    return;
+  }
+  if (backgroundPrefetch_->finished()) {
+    stopBackgroundPrefetch("complete_or_limit");
+    return;
+  }
+  // No new page scan / HTTPS during chapter layout or user input.
+  if (bleturner::holdsHeap() || buttonContactClosed() || anyButtonPressed() || pendingManualTurn != 0)
+    return;
+  bool building = true;
+  {
+    RenderLock lock(RenderLock::Mode::Try);
+    if (!lock.ownsLock()) return;
+    if (section && section.get() == backgroundPrefetchSection_) building = section->isBuilding();
+  }
+  if (building) return;
+  const auto heap = HalMemory::getInternalHeap();
+  if (heap.freeBytes < 94 * 1024 || heap.largestBlockBytes < 36 * 1024) {
+    stopBackgroundPrefetch("low_memory");
+    return;
+  }
+  backgroundPrefetch_->tick();
+  if (backgroundPrefetch_->finished()) stopBackgroundPrefetch("complete_or_limit");
+}
+#endif
 
 bool EpubReaderActivity::loadBook() {
   auto loadedEpub = makeUniqueNoThrow<Epub>(bookPath, "/.crosspoint");
@@ -619,9 +743,17 @@ void EpubReaderActivity::startClipSelection(const int initialX, const int initia
       return;
     }
     if (clipping.action == ClippingResult::Action::Translate) {
+      std::function<void(std::unique_ptr<AiSentencePrefetchSession>, bool)> onHandoff;
+#if defined(FREEINK_DEVICE_PICCO)
+      onHandoff = [this, selectedSection = section.get(), spineIndex](
+                      std::unique_ptr<AiSentencePrefetchSession> session, bool ownsWifi) {
+        adoptBackgroundPrefetch(std::move(session), ownsWifi, selectedSection, static_cast<uint32_t>(spineIndex));
+      };
+#endif
       auto translation = makeUniqueNoThrow<AiSentenceTranslationActivity>(
           renderer, mappedInput, clipping.text, clipping.sentence, bookPath,
-          AiPrefetchOrigin{section.get(), spineIndex, startPage, clipping.sentenceStartOffset, clipping.startOffset});
+          AiPrefetchOrigin{section.get(), spineIndex, startPage, clipping.sentenceStartOffset, clipping.startOffset},
+          std::move(onHandoff));
       if (!translation) {
         LOG_ERR("AI", "Insufficient memory for translation screen");
         requestUpdate();
@@ -1080,8 +1212,16 @@ void EpubReaderActivity::loop() {
   nextTriggered = nextTriggered || touch.next;
   if (!prevTriggered && !nextTriggered) {
     // Nothing to act on in this frame: build more of the chapter or prewarm ahead.
+#if defined(FREEINK_DEVICE_PICCO)
+    backgroundPrefetchTick();
+#endif
     if (!backgroundBuildTick()) {
+#if defined(FREEINK_DEVICE_PICCO)
+      // Do not prewarm fonts while background TLS holds constrained heap.
+      if (!AiSentencePrefetchSession::httpWorkerBusy()) idlePrewarmTick();
+#else
       idlePrewarmTick();
+#endif
     }
     return;
   }

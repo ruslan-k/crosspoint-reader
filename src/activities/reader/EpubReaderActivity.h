@@ -20,10 +20,27 @@
 #include "ReaderToolbarUi.h"
 #include "components/OptionPopup.h"
 
+class AiSentencePrefetchSession;
+
 class EpubReaderActivity final : public ReaderActivity {
   std::shared_ptr<Epub> epub;
   std::unique_ptr<Epub::SyncMetadata> vocabularyMetadata;
   std::unique_ptr<Section> section = nullptr;
+#if defined(FREEINK_DEVICE_PICCO)
+  // The reader, not the popup, owns the background session and its WiFi lease.
+  // Up to 25 batches (100 sentences) per book, across popup reanchors.
+  static constexpr uint16_t MAX_AI_BACKGROUND_BATCHES = 25;
+  std::unique_ptr<AiSentencePrefetchSession> backgroundPrefetch_;
+  Section* backgroundPrefetchSection_ = nullptr;
+  uint32_t backgroundPrefetchSpine_ = 0;
+  uint16_t backgroundRequestsUsed_ = 0;
+  uint32_t backgroundLastBatchAt_ = 0;
+  bool backgroundWifiOwned_ = false;
+  void adoptBackgroundPrefetch(std::unique_ptr<AiSentencePrefetchSession> session, bool ownsWifi,
+                               Section* sourceSection, uint32_t sourceSpine);
+  void stopBackgroundPrefetch(const char* reason, bool retainWifi = false);
+  void backgroundPrefetchTick();
+#endif
   int currentSpineIndex = 0;
   int nextPageNumber = 0;
   std::optional<uint16_t> pendingPageJump;
@@ -260,6 +277,8 @@ class EpubReaderActivity final : public ReaderActivity {
       : ReaderActivity("EpubReader", renderer, mappedInput, std::move(bookPath), allowFastInitialRefresh) {}
   ~EpubReaderActivity() override;
 
+  void onExit() override;
+  void prepareForSleep() override;
   void loop() override;
   void render(RenderLock&& lock) override;
 

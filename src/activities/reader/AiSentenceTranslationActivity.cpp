@@ -196,12 +196,14 @@ bool extractTranslationText(const std::string& raw, std::string& word, std::stri
 
 AiSentenceTranslationActivity::AiSentenceTranslationActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                                              std::string word, std::string sentence,
-                                                             std::string bookPath, AiPrefetchOrigin origin)
+                                                             std::string bookPath, AiPrefetchOrigin origin,
+                                                             std::function<void(std::unique_ptr<AiSentencePrefetchSession>, bool)> onHandoff)
     : Activity("AiSentenceTranslation", renderer, mappedInput),
       word_(std::move(word)),
       sentence_(std::move(sentence)),
       bookPath_(std::move(bookPath)),
-      origin_(origin) {}
+      origin_(origin),
+      onHandoff_(std::move(onHandoff)) {}
 
 AiSentenceTranslationActivity::~AiSentenceTranslationActivity() { releaseBackground(); }
 
@@ -426,9 +428,9 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
     if (!url.ends_with("/chat/completions")) url += "/chat/completions";
   }
 
-  // Match the already validated prefetch policy for this exact Go model.
-  const bool fastHy4 = config.getModel() == "hy4-flash-free" && ai_endpoint::isOpenCodeGoUrl(url);
-  const char* reasoningEffort = fastHy4 ? "none" : config.getReasoningEffort().c_str();
+  // Keep effort selection identical in foreground and background prefetch.
+  const bool fastHy4 = ai_completion::isHy4Go(config.getModel(), url);
+  const char* reasoningEffort = ai_completion::reasoningEffort(config.getModel(), url, config.getReasoningEffort());
 
   const std::string prompt =
       "Translate the selected word in context and its complete source sentence into Russian. "
@@ -654,7 +656,7 @@ void AiSentenceTranslationActivity::openResult(std::string wordTranslation, std:
   requestUpdate();
 #if defined(FREEINK_DEVICE_PICCO)
   // Do not scan or do TLS here: one small page/word scan is scheduled per
-  // later UI loop tick. The session exists ONLY while this modal is active.
+  // later UI loop tick. The EPUB reader adopts the session on popup exit.
   if (!prefetch_ && origin_.section && origin_.selectedWordOffset != UINT32_MAX) {
     ai_prefetch::Scope scope{bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel()};
     prefetch_ = makeUniqueNoThrow<AiSentencePrefetchSession>(std::move(scope), origin_.section, origin_.spine,
@@ -708,6 +710,23 @@ void AiSentenceTranslationActivity::loop() {
     return;
   }
   if (!requestPending_) return;
+#if defined(FREEINK_DEVICE_PICCO)
+  // A previous background POST may still be finishing after cancellation.
+  // Never allocate a second mbedTLS client until its cleanup is complete.
+  if (AiSentencePrefetchSession::httpWorkerBusy()) {
+    if (!waitingForBackground_) LOG_INF("AI_BG", "Foreground waiting for previous HTTPS worker");
+    waitingForBackground_ = true;
+    return;
+  }
+  if (waitingForBackground_) {
+    LOG_INF("AI_BG", "Foreground HTTPS gate released");
+    waitingForBackground_ = false;
+    if (WiFi.status() != WL_CONNECTED) {
+      fail(tr(STR_AI_NETWORK_FAILED));
+      return;
+    }
+  }
+#endif
   requestPending_ = false;
   state_ = State::Translating;
   requestUpdateAndWait();
@@ -755,9 +774,12 @@ void AiSentenceTranslationActivity::loop() {
 
 void AiSentenceTranslationActivity::onExit() {
   Activity::onExit();
-  // Closing the popup must not switch off WiFi beneath esp_http_client_perform.
-  // Hand WiFi ownership to the worker; it tears the radio down only AFTER
-  // HTTP cleanup, even when the popup has already been destroyed.
+  // The EPUB reader can continue the same scan with its own lifecycle.
+  // If no reader accepted the session, preserve the original deferred teardown.
+  if (prefetch_ && onHandoff_) {
+    onHandoff_(std::move(prefetch_), wifiOwned_);
+    wifiOwned_ = false;  // WiFi lease transferred to the reader as well.
+  }
   const bool deferredWifiShutdown = prefetch_ && prefetch_->cancel(wifiOwned_);
   prefetch_.reset();
   releaseBackground();

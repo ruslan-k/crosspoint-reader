@@ -2,6 +2,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -23,7 +25,8 @@ struct AiPrefetchOrigin {
 class AiSentenceTranslationActivity final : public Activity {
  public:
   AiSentenceTranslationActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string word,
-                                std::string sentence, std::string bookPath, AiPrefetchOrigin origin);
+                                std::string sentence, std::string bookPath, AiPrefetchOrigin origin,
+                                std::function<void(std::unique_ptr<AiSentencePrefetchSession>, bool)> onHandoff = {});
   ~AiSentenceTranslationActivity() override;
   void onEnter() override;
   void onExit() override;
@@ -53,6 +56,8 @@ class AiSentenceTranslationActivity final : public Activity {
   std::string bookPath_;
   AiPrefetchOrigin origin_;
   std::unique_ptr<AiSentencePrefetchSession> prefetch_;
+  std::function<void(std::unique_ptr<AiSentencePrefetchSession>, bool)> onHandoff_;
+  bool waitingForBackground_ = false;
   std::string error_;
   bool requestPending_ = false;
   bool retryPending_ = false;
