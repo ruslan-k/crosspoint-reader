@@ -328,7 +328,8 @@ void AiSentenceTranslationActivity::onEnter() {
   fullBookCache_ = complete;
   if (packageResult == ai_book_cache::Result::Hit) {
     if (!complete && AI_TRANSLATION_STORE.loadFromFile())
-      ai_cache_server::watch(bookPath_, AI_TRANSLATION_STORE.getCacheServerUrl());
+      ai_cache_server::watch(bookPath_, AI_TRANSLATION_STORE.getCacheServerUrl(),
+                             AI_TRANSLATION_STORE.getCacheServerToken());
     LOG_INF("AI_CACHE", "Book package cache hit");
     openResult(std::move(cachedSentence));
     return;
@@ -339,7 +340,8 @@ void AiSentenceTranslationActivity::onEnter() {
 #if defined(FREEINK_DEVICE_PICCO)
   // A package miss can be repaired without a BYOK key: the server owns its
   // separate model and publishes verified .aic snapshots as they appear.
-  if (!fullBookCache_) ai_cache_server::watch(bookPath_, settingsLoaded ? AI_TRANSLATION_STORE.getCacheServerUrl() : "");
+  if (!fullBookCache_) ai_cache_server::watch(bookPath_, settingsLoaded ? AI_TRANSLATION_STORE.getCacheServerUrl() : "",
+                                               settingsLoaded ? AI_TRANSLATION_STORE.getCacheServerToken() : "");
 #endif
   if (!settingsLoaded || !AI_TRANSLATION_STORE.configured()) {
     fail(tr(STR_AI_NOT_CONFIGURED));
