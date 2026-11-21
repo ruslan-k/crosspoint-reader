@@ -1767,6 +1767,7 @@ void CrossPointWebServer::handleGetAiTranslation() const {
   doc["model"] = AI_TRANSLATION_STORE.getModel();
   doc["reasoningEffort"] = AI_TRANSLATION_STORE.getReasoningEffort();
   doc["ai_cache_server_url"] = AI_TRANSLATION_STORE.getCacheServerUrl();
+  doc["hasCacheServerToken"] = AI_TRANSLATION_STORE.hasCacheServerToken();
   doc["hasKey"] = AI_TRANSLATION_STORE.hasKey();
   String response;
   serializeJson(doc, response);
@@ -1818,7 +1819,17 @@ void CrossPointWebServer::handlePostAiTranslation() {
     server->send(400, "text/plain", "Invalid cache server base URL");
     return;
   }
-  if (!AI_TRANSLATION_STORE.configure(url, model, key, replaceKey, reasoningEffort, cacheServerUrl)) {
+  const bool clearCacheToken = doc["clearCacheServerToken"] | false;
+  const bool replaceCacheToken = clearCacheToken || doc["ai_cache_server_token"].is<const char*>();
+  const std::string cacheToken = clearCacheToken ? std::string() : std::string(doc["ai_cache_server_token"] | "");
+  if (cacheToken.size() > 256 || std::any_of(cacheToken.begin(), cacheToken.end(), [](unsigned char c) {
+        return c < 0x20 || c == 0x7f;
+      })) {
+    server->send(400, "text/plain", "Invalid cache server token");
+    return;
+  }
+  if (!AI_TRANSLATION_STORE.configure(url, model, key, replaceKey, reasoningEffort, cacheServerUrl,
+                                     cacheToken, replaceCacheToken)) {
     server->send(500, "text/plain", "Could not save AI settings on SD card");
     return;
   }

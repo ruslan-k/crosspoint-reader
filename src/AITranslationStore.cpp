@@ -9,6 +9,8 @@ void AITranslationStore::toJson(JsonDocument& doc) const {
   doc["model"] = model_;
   doc["reasoningEffort"] = reasoningEffort_;
   doc["ai_cache_server_url"] = cacheServerUrl_;
+  // Same best-effort SD-card obfuscation as the AI provider key; not encryption.
+  doc["ai_cache_server_token_obf"] = obfuscation::obfuscateToBase64(cacheServerToken_);
   // Device-MAC XOR obfuscation is only protection from casual SD inspection,
   // not encryption. The web API never returns this value.
   doc["key_obf"] = obfuscation::obfuscateToBase64(key_);
@@ -19,6 +21,7 @@ bool AITranslationStore::fromJson(JsonVariantConst doc) {
   const char* model = doc["model"] | "";
   const char* effort = doc["reasoningEffort"] | "default";
   const char* cacheUrl = doc["ai_cache_server_url"] | "";
+  const char* cacheTokenEncoded = doc["ai_cache_server_token_obf"] | "";
   const char* encoded = doc["key_obf"] | "";
   if (strlen(url) > 255 || strlen(model) > 96 || strlen(cacheUrl) > 255) return false;
   url_ = url;
@@ -26,6 +29,13 @@ bool AITranslationStore::fromJson(JsonVariantConst doc) {
   // Old files have no effort field. Invalid stored values safely revert to provider default.
   reasoningEffort_ = validReasoningEffort(effort) ? effort : "default";
   cacheServerUrl_ = cacheUrl;
+  cacheServerToken_.clear();
+  if (cacheTokenEncoded[0]) {
+    bool valid = false;
+    bool tooLong = false;
+    cacheServerToken_ = obfuscation::deobfuscateFromBase64(cacheTokenEncoded, 256, &valid, &tooLong);
+    if (!valid || tooLong) cacheServerToken_.clear();
+  }
   key_.clear();
   if (encoded[0]) {
     bool valid = false;
@@ -38,12 +48,14 @@ bool AITranslationStore::fromJson(JsonVariantConst doc) {
 
 bool AITranslationStore::configure(const std::string& url, const std::string& model, const std::string& key,
                                    const bool replaceKey, const std::string& reasoningEffort,
-                                   const std::string& cacheServerUrl) {
+                                   const std::string& cacheServerUrl,
+                                   const std::string& cacheServerToken, const bool replaceCacheServerToken) {
   if (!validReasoningEffort(reasoningEffort)) return false;
   url_ = url;
   model_ = model;
   reasoningEffort_ = reasoningEffort;
   cacheServerUrl_ = cacheServerUrl;
+  if (replaceCacheServerToken) cacheServerToken_ = cacheServerToken;
   if (replaceKey) key_ = key;
   return saveToFile();
 }

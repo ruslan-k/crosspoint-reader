@@ -446,7 +446,8 @@ bool EpubReaderActivity::loadBook() {
   // networking in this loading path; the idle worker handles both.
   AI_TRANSLATION_STORE.loadFromFile();
   if (ai_book_cache::needsServer(bookPath))
-    ai_cache_server::watch(bookPath, AI_TRANSLATION_STORE.getCacheServerUrl());
+    ai_cache_server::watch(bookPath, AI_TRANSLATION_STORE.getCacheServerUrl(),
+                            AI_TRANSLATION_STORE.getCacheServerToken());
 #endif
 
   ImageBlock::clearRenderFailures();

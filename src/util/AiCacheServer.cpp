@@ -29,6 +29,7 @@
 
 #include "WifiCredentialStore.h"
 #include "util/AiBookCache.h"
+#include "util/AiCacheServerUrl.h"
 #include "util/AiHttpWorkerGate.h"
 #include "util/AiTranslationRoots.h"
 
@@ -48,6 +49,7 @@ enum class Step : uint8_t { Status, Upload, Download };
 struct Work {
   std::string path;
   std::string url;
+  std::string token;
   std::string sha;
   std::string expectedAicSha;
   std::string error;
@@ -69,6 +71,7 @@ struct Work {
 struct State {
   std::string bookPath;
   std::string baseUrl;
+  std::string token;
   std::string sha;
   std::string aicSha;
   uint8_t bookSha[32]{};
@@ -131,11 +134,13 @@ bool beginResponse(esp_http_client_handle_t client, int64_t requestBytes, int& s
 }
 
 bool readStatus(Work& work, std::string& serverState) {
-  const std::string endpoint = work.url + "/api/cache/status?sha=" + work.sha;
+  const std::string endpoint = buildRequestUrl(work.url, "/status", work.sha, work.token);
   auto* client = clientFor(endpoint, HTTP_METHOD_GET);
   if (!client) return false;
   int status = 0;
-  bool ok = beginResponse(client, 0, status) && status == 200;
+  const bool received = beginResponse(client, 0, status);
+  if (received && status == 401) setError(work, "unauthorized");
+  bool ok = received && status == 200;
   std::string body;
   if (ok) {
     char buffer[256];
@@ -181,7 +186,7 @@ bool uploadEpub(Work& work) {
   const std::string suffix = std::string("\r\n--") + BOUNDARY + "--\r\n";
   const uint64_t total = prefix.size() + bytes + suffix.size();
   if (total > INT32_MAX) return false;
-  auto* client = clientFor(work.url + "/api/cache/job", HTTP_METHOD_POST);
+  auto* client = clientFor(buildRequestUrl(work.url, "/job", "", work.token), HTTP_METHOD_POST);
   if (!client) return false;
   const std::string contentType = std::string("multipart/form-data; boundary=") + BOUNDARY;
   esp_http_client_set_header(client, "Content-Type", contentType.c_str());
@@ -208,10 +213,13 @@ bool uploadEpub(Work& work) {
   }
   epub.close();
   if (ok) ok = writeAll(suffix.data(), suffix.size());
-  if (ok) {
+  if (opened && !work.cancel.load()) {
+    // A server may reject the POST before the EPUB body has been fully sent.
+    // Read its response even after a short write to recognize HTTP 401.
     esp_http_client_fetch_headers(client);
     const int status = esp_http_client_get_status_code(client);
-    ok = status == 200 || status == 201 || status == 202;
+    if (status == 401) setError(work, "unauthorized");
+    if (ok) ok = status == 200 || status == 201 || status == 202;
   }
   esp_http_client_close(client);
   esp_http_client_cleanup(client);
@@ -219,11 +227,13 @@ bool uploadEpub(Work& work) {
 }
 
 bool downloadPackage(Work& work) {
-  const std::string endpoint = work.url + "/api/cache/download?sha=" + work.sha;
+  const std::string endpoint = buildRequestUrl(work.url, "/download", work.sha, work.token);
   auto* client = clientFor(endpoint, HTTP_METHOD_GET);
   if (!client) return false;
   int status = 0;
-  bool ok = beginResponse(client, 0, status) && status == 200;
+  const bool received = beginResponse(client, 0, status);
+  if (received && status == 401) setError(work, "unauthorized");
+  bool ok = received && status == 200;
   const int64_t length = esp_http_client_get_content_length(client);
   if (length > static_cast<int64_t>(MAX_PACKAGE_BYTES)) ok = false;
   const std::string temporary = work.path + ".aic.part";
@@ -309,7 +319,7 @@ void runWorker(void* arg) {
         work.next = Step::Status;
       }
     } else {
-      setError(work, "status_http_or_json");
+      if (work.error.empty()) setError(work, "status_http_or_json");
     }
   } else if (ok && work.step == Step::Upload) {
     ok = uploadEpub(work);
@@ -317,7 +327,7 @@ void runWorker(void* arg) {
       LOG_INF("AI_SRV", "job queued sha=%.16s", work.sha.c_str());
       work.next = Step::Status;
     } else {
-      setError(work, "upload_failed");
+      if (work.error.empty()) setError(work, "upload_failed");
     }
   } else if (ok && work.step == Step::Download) {
     ok = downloadPackage(work);
@@ -325,7 +335,7 @@ void runWorker(void* arg) {
       work.next = Step::Status;
       work.finished = work.complete;
     } else {
-      setError(work, "download_or_validation");
+      if (work.error.empty()) setError(work, "download_or_validation");
     }
   }
   if (work.cancel.load()) {
@@ -375,6 +385,7 @@ void launch() {
   auto job = std::make_shared<Work>();
   job->path = state.bookPath;
   job->url = state.baseUrl;
+  job->token = state.token;
   job->sha = state.sha;
   job->expectedAicSha = state.aicSha;
   memcpy(job->bookSha, state.bookSha, sizeof(job->bookSha));
@@ -398,10 +409,14 @@ bool validBaseUrl(const std::string& url) {
   if (url.empty()) return true;
   const size_t prefix = url.rfind("http://", 0) == 0 ? 7 : url.rfind("https://", 0) == 0 ? 8 : 0;
   if (!prefix || url.size() > 255 || url.size() <= prefix ||
-      url.find_first_of("?#@\r\n\t ") != std::string::npos) return false;
+      url.find_first_of("#@\r\n\t ") != std::string::npos) return false;
+  const size_t query = url.find('?', prefix);
+  const size_t end = query == std::string::npos ? url.size() : query;
   const size_t slash = url.find('/', prefix);
-  return url[prefix] != ':' && url[prefix] != '/' &&
-         (slash == std::string::npos || slash == url.size() - 1);
+  if (url[prefix] == ':' || url[prefix] == '/' || url[prefix] == '?') return false;
+  if (slash == std::string::npos || slash >= end) return true;
+  const std::string path = url.substr(slash, end - slash);
+  return path == "/" || path == "/api/cache" || path == "/api/cache/";
 }
 
 void cancel() {
@@ -423,15 +438,16 @@ void cancel() {
   state = State{};
 }
 
-void watch(const std::string& bookPath, const std::string& baseUrl) {
-  if (state.bookPath == bookPath && state.baseUrl == baseUrl && !state.terminal) return;
+void watch(const std::string& bookPath, const std::string& baseUrl, const std::string& token) {
+  if (state.bookPath == bookPath && state.baseUrl == baseUrl && state.token == token && !state.terminal) return;
   cancel();
   if (!validBaseUrl(baseUrl) || baseUrl.empty()) {
     LOG_INF("AI_SRV", "disabled");
     return;
   }
   state.bookPath = bookPath;
-  state.baseUrl = baseUrl.back() == '/' ? baseUrl.substr(0, baseUrl.size() - 1) : baseUrl;
+  state.baseUrl = baseUrl;
+  state.token = token;
   state.nextPollAt = millis();
 }
 
@@ -534,7 +550,7 @@ void tick(bool otherWifiUser) {
 #else
 namespace ai_cache_server {
 bool validBaseUrl(const std::string& url) { return url.empty(); }
-void watch(const std::string&, const std::string&) {}
+void watch(const std::string&, const std::string&, const std::string&) {}
 void tick(bool) {}
 void pauseForForeground() {}
 void adoptWifi() {}
