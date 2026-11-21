@@ -1126,6 +1126,18 @@ void loop() {
           if (Storage.remove(full.c_str()) || Storage.removeDir(full.c_str())) removed++;
         }
         logSerial.printf("PURGE_RESULT:%d/%zu\n", removed, names.size());
+      } else if (cmd.startsWith("OPDS_URL:")) {
+        const std::string url(cmd.substring(9).c_str());
+        bool ok = false;
+        if (!OPDS_STORE.getServers().empty()) {
+          OpdsServer server = OPDS_STORE.getServers()[0];
+          server.url = url;
+          ok = OPDS_STORE.updateServer(0, server);
+        }
+        logSerial.printf("OPDS_URL_RESULT:%s\n", ok ? "ok" : "fail");
+      } else if (cmd == "USBDRIVE") {
+        const bool ok = Storage.beginUsbDrive();
+        logSerial.printf("USBDRIVE_RESULT:%s\n", ok ? "ok" : "fail");
       }
     }
   }

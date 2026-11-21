@@ -668,14 +668,8 @@
       '>' + escapeHtml(opt[1]) + '</option>').join('');
     document.getElementById('ai-translation-container').innerHTML =
       '<div class="card"><h2>AI Translation</h2>' +
-      '<p style="color:var(--label-color);">Translate the selected word and its full EPUB sentence to Russian. Configure your own Gemini, Groq or OpenCode Go key. Only text you request to translate is sent to the provider.</p>' +
+      '<p style="color:var(--label-color);">Translate the selected word and its full EPUB sentence to Russian through the AI Cache Server. No online provider credentials are needed on the device.</p>' +
       '<div class="item-box" oninput="enableItemSave(this)">' +
-        '<div class="setting-row"><span class="setting-name">API URL (HTTPS)</span>' +
-          '<span class="setting-control"><input type="url" id="ai-url" spellcheck="false" value="' + escapeHtml(config.url || '') + '" placeholder="https://api.groq.com/openai/v1"></span></div>' +
-        '<div class="setting-row"><span class="setting-name">API Key</span>' +
-          '<span class="setting-control"><input type="password" id="ai-key" autocomplete="new-password" spellcheck="false" placeholder="' + (config.hasKey ? '(unchanged)' : 'Your API key') + '"></span></div>' +
-        '<div class="setting-row"><span class="setting-name">AI Model</span>' +
-          '<span class="setting-control"><input type="text" id="ai-model" spellcheck="false" value="' + escapeHtml(config.model || '') + '" placeholder="deepseek-v4.1-flash"></span></div>' +
         '<div class="setting-row"><label class="setting-name" for="ai-cache-server-url">AI Cache Server URL</label>' +
           '<span class="setting-control"><input type="url" id="ai-cache-server-url" spellcheck="false" value="' + escapeHtml(config.ai_cache_server_url || '') + '" placeholder="http://192.168.50.37:8791"></span></div>' +
         '<div class="setting-row"><label class="setting-name" for="ai-cache-server-token">AI Cache Server Token</label>' +
@@ -683,7 +677,6 @@
         '<div class="setting-row"><label class="setting-name" for="ai-reasoning-effort">Reasoning effort</label>' +
           '<span class="setting-control"><select id="ai-reasoning-effort" onchange="enableItemSave(this.closest(\'.item-box\'))">' +
           effortOptions + '</select></span></div>' +
-        '<label style="display:flex;align-items:center;gap:8px;margin-top:8px;"><input type="checkbox" id="ai-clear-key"> Remove saved API key</label>' +
         '<label style="display:flex;align-items:center;gap:8px;margin-top:8px;"><input type="checkbox" id="ai-clear-cache-token"> Remove saved cache server token</label>' +
         '<div class="item-actions"><button class="btn-small btn-save-server" onclick="saveAiTranslation()" disabled>Save</button></div>' +
       '</div>' +
@@ -709,16 +702,11 @@
     const box = document.getElementById('ai-translation-container');
     const btn = box.querySelector('.btn-save-server');
     btn.disabled = true;
-    const data = {url: document.getElementById('ai-url').value.trim(),
-                  model: document.getElementById('ai-model').value.trim(),
-                  reasoningEffort: document.getElementById('ai-reasoning-effort').value,
+    const data = {reasoningEffort: document.getElementById('ai-reasoning-effort').value,
                   ai_cache_server_url: document.getElementById('ai-cache-server-url').value.trim()};
-    const key = document.getElementById('ai-key').value.trim();
     const cacheToken = document.getElementById('ai-cache-server-token').value.trim();
     if (document.getElementById('ai-clear-cache-token').checked) data.clearCacheServerToken = true;
     else if (cacheToken) data.ai_cache_server_token = cacheToken;
-    if (document.getElementById('ai-clear-key').checked) data.clearKey = true;
-    else if (key) data.apiKey = key;
     try {
       const response = await fetch('/api/ai-translation', {
         method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)
