@@ -303,8 +303,12 @@ bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, 
         !request.append("}]}],\"generationConfig\":{\"maxOutputTokens\":2048}}"))
       return false;
   } else {
-    if (!request.append("{\"model\":") || !request.quoted(model) ||
-        !request.append(streaming
+    if (!request.append("{\"model\":") || !request.quoted(model)) return false;
+    const std::string& reasoningEffort = AI_TRANSLATION_STORE.getReasoningEffort();
+    if (reasoningEffort != "default" &&
+        (!request.append(",\"reasoning_effort\":") || !request.quoted(reasoningEffort)))
+      return false;
+    if (!request.append(streaming
                             ? ",\"max_tokens\":2048,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":"
                             : ",\"max_tokens\":2048,\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":") ||
         !request.quoted(prompt.view()) || !request.append("}]}"))
