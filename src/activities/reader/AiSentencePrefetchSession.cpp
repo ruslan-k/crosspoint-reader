@@ -843,8 +843,10 @@ bool AiSentencePrefetchSession::launchBatch() {
   }
   job->startedAt = millis();
   job->response.startedAt = job->startedAt;
-  LOG_INF("AI_PRE", "Batch started: count=%u mode=%s header_timeout=%d idle_timeout=%d internal=%u largest=%u",
-          static_cast<unsigned>(job->batch.size()), job->streaming ? "sse" : "json", HTTP_TIMEOUT_MS,
+  LOG_INF("AI_PRE",
+          "Batch started: count=%u mode=%s effort=%s header_timeout=%d idle_timeout=%d internal=%u largest=%u",
+          static_cast<unsigned>(job->batch.size()), job->streaming ? "sse" : "json",
+          job->gemini ? "ignored-gemini" : AI_TRANSLATION_STORE.getReasoningEffort().c_str(), HTTP_TIMEOUT_MS,
           HTTP_READ_IDLE_TIMEOUT_MS,
           static_cast<unsigned>(HalMemory::getInternalHeap().freeBytes),
           static_cast<unsigned>(HalMemory::getInternalHeap().largestBlockBytes));
