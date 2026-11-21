@@ -38,6 +38,7 @@
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#include "AITranslationStore.h"
 #include "KOReaderCredentialStore.h"
 #include "LcpPassphraseStore.h"
 #include "MappedInputManager.h"
@@ -1059,6 +1060,15 @@ void loop() {
         uint8_t* buf = display.getFrameBuffer();
         logSerial.write(buf, bufferSize);
         logSerial.printf("SCREENSHOT_END\n");
+      } else if (cmd.startsWith("AI_TOKEN:")) {
+        std::string tok(cmd.substring(9).c_str());
+        bool ok = AI_TRANSLATION_STORE.configure(
+            AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel(),
+            AI_TRANSLATION_STORE.getKey(), /*replaceKey=*/false,
+            AI_TRANSLATION_STORE.getReasoningEffort(),
+            AI_TRANSLATION_STORE.getCacheServerUrl(), tok,
+            /*replaceCacheServerToken=*/true);
+        logSerial.printf("AI_TOKEN_RESULT:%s\n", ok ? "ok" : "fail");
       }
     }
   }
