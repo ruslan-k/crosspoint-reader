@@ -198,6 +198,7 @@ jobs:
       - name: Test firmware comment and measurements
         run: |
           python3 -m unittest discover -s test -p test_firmware_stats.py
+          python3 test/test_ai_reasoning_effort.py
           node --test test/firmware_comment.test.js
 
       - name: Install build tools
