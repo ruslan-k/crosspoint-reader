@@ -9,6 +9,12 @@
 // handled by ClipSelectionActivity.
 namespace ai_sentence {
 
+// EPUB dc:language is authoritative; character heuristics alone misclassify
+// short Bulgarian and Ukrainian sentences as Russian.
+inline bool isRussianLanguage(std::string_view language) {
+  return language.size() >= 2 && (language[0] | 0x20) == 'r' && (language[1] | 0x20) == 'u';
+}
+
 // Skip translation for Cyrillic source text, but allow Bulgarian (bg->ru).
 // Russian ы/ё/э are absent in Bulgarian; Bulgarian ъ is frequent, Russian hard
 // sign is rare. Three letters avoids tripping on a lone Cyrillic name.

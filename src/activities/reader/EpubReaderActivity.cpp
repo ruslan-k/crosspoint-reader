@@ -30,6 +30,7 @@
 #include "AiSentenceTranslationActivity.h"
 #if defined(FREEINK_DEVICE_PICCO)
 #include "AiSentencePrefetchSession.h"
+#include "util/AiSentenceUtils.h"
 #include "util/AiBookCache.h"
 #include "util/AiCacheServer.h"
 #endif
@@ -445,12 +446,9 @@ bool EpubReaderActivity::loadBook() {
   // Start automatically for a missing whole-book package. No SHA scan or
   // networking in this loading path; the idle worker handles both.
   AI_TRANSLATION_STORE.loadFromFile();
-  const std::string& bookLanguage = epub->getLanguage();
-  static constexpr const char* kCyrillicLanguages[] = {"ru", "uk", "be", "kk", "mk", "sr", "ky", "tt", "mn", "uz"};
-  const bool cyrillicBook = std::any_of(std::begin(kCyrillicLanguages), std::end(kCyrillicLanguages),
-                                        [&](const char* prefix) { return bookLanguage.rfind(prefix, 0) == 0; });
-  if (cyrillicBook) {
-    LOG_INF("AI_SRV", "skip: Cyrillic source book");
+  const bool russianBook = ai_sentence::isRussianLanguage(epub->getLanguage());
+  if (russianBook) {
+    LOG_INF("AI_SRV", "skip: Russian source book");
   } else if (ai_book_cache::needsServer(bookPath))
     ai_cache_server::watch(bookPath, AI_TRANSLATION_STORE.getCacheServerUrl(),
                             AI_TRANSLATION_STORE.getCacheServerToken());
@@ -805,7 +803,7 @@ void EpubReaderActivity::startClipSelection(const int initialX, const int initia
       };
 #endif
       auto translation = makeUniqueNoThrow<AiSentenceTranslationActivity>(
-          renderer, mappedInput, clipping.sentence, bookPath,
+          renderer, mappedInput, clipping.sentence, bookPath, epub->getLanguage(),
           AiPrefetchOrigin{section.get(), spineIndex, startPage, clipping.sentenceStartOffset,
                             clipping.startOffset},
           std::move(onHandoff));

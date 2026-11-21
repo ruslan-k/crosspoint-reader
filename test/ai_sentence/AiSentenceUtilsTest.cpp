@@ -29,5 +29,10 @@ int main() {
   assert(!ai_sentence::isRussianText("Ivan"));
   assert(!ai_sentence::isRussianText("\xD0\xA2\xD0\xBE\xD0\xB2\xD0\xB0 \xD0\xB5 \xD0\xB1\xD1\x8A\xD0\xBB\xD0\xB3\xD0\xB0\xD1\x80\xD1\x81\xD0\xBA\xD0\xB8 \xD1\x82\xD0\xB5\xD0\xBA\xD1\x81\xD1\x82."));  // Bulgarian
   assert(ai_sentence::isRussianText("\xD1\x81\xD1\x8A\xD0\xB5\xD0\xB7\xD0\xB4"));  // съезд
+  assert(ai_sentence::isRussianLanguage("ru"));
+  assert(ai_sentence::isRussianLanguage("ru-RU"));
+  assert(!ai_sentence::isRussianLanguage("bg"));
+  assert(!ai_sentence::isRussianLanguage("uk"));
+  assert(!ai_sentence::isRussianLanguage(""));
   return 0;
 }

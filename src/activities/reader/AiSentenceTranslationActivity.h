@@ -25,7 +25,7 @@ struct AiPrefetchOrigin {
 class AiSentenceTranslationActivity final : public Activity {
  public:
   AiSentenceTranslationActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string sentence,
-                                std::string bookPath, AiPrefetchOrigin origin,
+                                std::string bookPath, std::string bookLanguage, AiPrefetchOrigin origin,
                                 std::function<void(std::unique_ptr<AiSentencePrefetchSession>, bool)> onHandoff = {});
   ~AiSentenceTranslationActivity() override;
   void onEnter() override;
@@ -53,6 +53,7 @@ class AiSentenceTranslationActivity final : public Activity {
   State state_ = State::Connecting;
   std::string sentence_;
   std::string bookPath_;
+  std::string bookLanguage_;
   AiPrefetchOrigin origin_;
   std::unique_ptr<AiSentencePrefetchSession> prefetch_;
   std::function<void(std::unique_ptr<AiSentencePrefetchSession>, bool)> onHandoff_;

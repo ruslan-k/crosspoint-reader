@@ -192,11 +192,12 @@ bool extractTranslationText(const std::string& raw, std::string& sentence) {
 
 AiSentenceTranslationActivity::AiSentenceTranslationActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                                              std::string sentence, std::string bookPath,
-                                                             AiPrefetchOrigin origin,
+                                                             std::string bookLanguage, AiPrefetchOrigin origin,
                                                              std::function<void(std::unique_ptr<AiSentencePrefetchSession>, bool)> onHandoff)
     : Activity("AiSentenceTranslation", renderer, mappedInput),
       sentence_(std::move(sentence)),
       bookPath_(std::move(bookPath)),
+      bookLanguage_(std::move(bookLanguage)),
       origin_(origin),
       onHandoff_(std::move(onHandoff)) {}
 
@@ -321,8 +322,8 @@ void AiSentenceTranslationActivity::onEnter() {
     fail(tr(STR_AI_BAD_RESPONSE));
     return;
   }
-  if (ai_sentence::isRussianText(sentence_)) {
-    LOG_INF("AI_CACHE", "Skip: source already Russian");
+  if (ai_sentence::isRussianLanguage(bookLanguage_) && ai_sentence::isRussianText(sentence_)) {
+    LOG_INF("AI_CACHE", "Skip: Russian source book/sentence");
     openResult(sentence_);
     return;
   }
@@ -344,12 +345,19 @@ void AiSentenceTranslationActivity::onEnter() {
 #endif
   const bool settingsLoaded = AI_TRANSLATION_STORE.loadFromFile();
 #if defined(FREEINK_DEVICE_PICCO)
-  // A package miss can be repaired without a BYOK key: the server owns its
-  // separate model and publishes verified .aic snapshots as they appear.
-  if (!fullBookCache_) ai_cache_server::watch(bookPath_, settingsLoaded ? AI_TRANSLATION_STORE.getCacheServerUrl() : "",
-                                               settingsLoaded ? AI_TRANSLATION_STORE.getCacheServerToken() : "");
+  // A package miss is repaired by the cache server even when BYOK fields are
+  // intentionally empty. watch() also re-arms an already terminal job.
+  ai_cache_server::watch(bookPath_, settingsLoaded ? AI_TRANSLATION_STORE.getCacheServerUrl() : "",
+                         settingsLoaded ? AI_TRANSLATION_STORE.getCacheServerToken() : "");
 #endif
   if (!settingsLoaded || !AI_TRANSLATION_STORE.configured()) {
+#if defined(FREEINK_DEVICE_PICCO)
+    if (ai_cache_server::active()) {
+      LOG_INF("AI_CACHE", "Pending: waiting for cache server update");
+      fail(tr(STR_AI_TRANSLATING));
+      return;
+    }
+#endif
     fail(tr(STR_AI_NOT_CONFIGURED));
     return;
   }

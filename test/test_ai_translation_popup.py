@@ -37,6 +37,9 @@ assert "ai_translation_cache::load(" in src
 assert "ai_translation_cache::save(" in src
 assert 'append(word_ + " — "' not in src
 assert "ai_book_cache::lookupSentence(" in src
+assert "Pending: waiting for cache server update" in src
+assert "ai_cache_server::active()" in src
+assert "ai_sentence::isRussianLanguage(bookLanguage_)" in src
 assert "ai_prefetch::lookupSentence(" in src
 assert "Translate this complete sentence" in src
 print("AI translation popup, scrolling, and selection guards passed")
