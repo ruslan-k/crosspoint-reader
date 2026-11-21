@@ -287,7 +287,7 @@ void AiSentenceTranslationActivity::drawPopup() const {
   // Inset white panel with a black border like the dictionary dialog.
   renderer.fillRoundedRect(rect.x, rect.y, rect.width, rect.height, 5, Color::White);
   renderer.drawRoundedRect(rect.x, rect.y, rect.width, rect.height, 2, 5, true);
-  renderer.drawText(NOTOSANS_14_FONT_ID, rect.x + AI_POPUP_PADDING, rect.y + 11, tr(STR_AI_TRANSLATE), true,
+  renderer.drawText(NOTOSANS_12_FONT_ID, rect.x + AI_POPUP_PADDING, rect.y + 13, tr(STR_AI_TRANSLATE), true,
                     EpdFontFamily::BOLD);
   renderer.drawLine(rect.x + 12, rect.y + AI_POPUP_TITLE_HEIGHT, rect.x + rect.width - 12,
                     rect.y + AI_POPUP_TITLE_HEIGHT, true);
