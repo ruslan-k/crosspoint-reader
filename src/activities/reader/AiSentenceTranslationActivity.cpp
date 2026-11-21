@@ -441,6 +441,7 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
     req["generationConfig"].to<JsonObject>()["maxOutputTokens"] = ai_completion::maxOutputTokens(generationAttempt_);
   } else {
     req["model"] = config.getModel();
+    if (config.getReasoningEffort() != "default") req["reasoning_effort"] = config.getReasoningEffort();
     // Chat-completions max_tokens includes hidden reasoning for some models.
     // Use a larger cap and retry once ONLY if finish_reason reports a limit.
     req["max_tokens"] = ai_completion::maxOutputTokens(generationAttempt_);
