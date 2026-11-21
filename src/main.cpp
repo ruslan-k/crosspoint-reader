@@ -1077,6 +1077,55 @@ void loop() {
             AI_TRANSLATION_STORE.getReasoningEffort(), url,
             AI_TRANSLATION_STORE.getCacheServerToken(), /*replaceCacheServerToken=*/false);
         logSerial.printf("AI_URL_RESULT:%s\n", ok ? "ok" : "fail");
+      } else if (cmd.startsWith("RM:")) {
+        const std::string path(cmd.substring(3).c_str());
+        const bool ok = Storage.remove(path.c_str());
+        logSerial.printf("RM_RESULT:%s\n", ok ? "ok" : "fail");
+      } else if (cmd.startsWith("LS:")) {
+        const std::string dirPath(cmd.substring(3).c_str());
+        HalFile dir = Storage.open(dirPath.c_str());
+        if (dir && dir.isDirectory()) {
+          dir.rewindDirectory();
+          for (int i = 0; i < 32; i++) {
+            HalFile entry = dir.openNextFile();
+            if (!entry) break;
+            char nameBuf[512] = {};
+            entry.getName(nameBuf, sizeof(nameBuf));
+            logSerial.printf("LS_ENTRY:%d dir=%d hex=", i, entry.isDirectory() ? 1 : 0);
+            for (size_t j = 0; nameBuf[j]; j++) logSerial.printf("%02x", static_cast<unsigned char>(nameBuf[j]));
+            logSerial.print("\n");
+            entry.close();
+          }
+          dir.close();
+        } else {
+          logSerial.print("LS_RESULT:fail\n");
+        }
+      } else if (cmd.startsWith("RMDIR:")) {
+        const std::string dirPath(cmd.substring(6).c_str());
+        const bool ok = Storage.removeDir(dirPath.c_str());
+        logSerial.printf("RMDIR_RESULT:%s\n", ok ? "ok" : "fail");
+      } else if (cmd.startsWith("PURGE:")) {
+        const std::string dirPath(cmd.substring(6).c_str());
+        std::vector<std::string> names;
+        HalFile dir = Storage.open(dirPath.c_str());
+        if (dir && dir.isDirectory()) {
+          dir.rewindDirectory();
+          for (int i = 0; i < 512; i++) {
+            HalFile entry = dir.openNextFile();
+            if (!entry) break;
+            char nameBuf[512] = {};
+            entry.getName(nameBuf, sizeof(nameBuf));
+            if (nameBuf[0]) names.push_back(std::string(nameBuf));
+            entry.close();
+          }
+          dir.close();
+        }
+        int removed = 0;
+        for (const auto& name : names) {
+          const std::string full = dirPath + "/" + name;
+          if (Storage.remove(full.c_str()) || Storage.removeDir(full.c_str())) removed++;
+        }
+        logSerial.printf("PURGE_RESULT:%d/%zu\n", removed, names.size());
       }
     }
   }
