@@ -10,6 +10,7 @@
 #include <optional>
 #include <vector>
 
+#include "AiSentencePrefetchSession.h"
 #include "BookmarkEntry.h"
 #include "ChapterPosition.h"
 #include "ClipSelectionActivity.h"
