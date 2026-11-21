@@ -1764,6 +1764,7 @@ void CrossPointWebServer::handleGetAiTranslation() const {
   JsonDocument doc;
   doc["url"] = AI_TRANSLATION_STORE.getUrl();
   doc["model"] = AI_TRANSLATION_STORE.getModel();
+  doc["reasoningEffort"] = AI_TRANSLATION_STORE.getReasoningEffort();
   doc["hasKey"] = AI_TRANSLATION_STORE.hasKey();
   String response;
   serializeJson(doc, response);
@@ -1800,8 +1801,15 @@ void CrossPointWebServer::handlePostAiTranslation() {
     server->send(400, "text/plain", "Invalid API key");
     return;
   }
-  AI_TRANSLATION_STORE.loadFromFile();  // Keep the existing key if omitted.
-  if (!AI_TRANSLATION_STORE.configure(url, model, key, replaceKey)) {
+  AI_TRANSLATION_STORE.loadFromFile();  // Preserve the existing key/effort if omitted.
+  const std::string reasoningEffort = doc["reasoningEffort"].is<const char*>()
+                                          ? doc["reasoningEffort"].as<const char*>()
+                                          : AI_TRANSLATION_STORE.getReasoningEffort();
+  if (!AITranslationStore::validReasoningEffort(reasoningEffort)) {
+    server->send(400, "text/plain", "Invalid reasoning effort");
+    return;
+  }
+  if (!AI_TRANSLATION_STORE.configure(url, model, key, replaceKey, reasoningEffort)) {
     server->send(500, "text/plain", "Could not save AI settings on SD card");
     return;
   }
