@@ -333,6 +333,7 @@ int findPrior(WalkState& st, const uint64_t pathHash) {
   bool titleFromBook = false;
   bool authorFromBook = false;
 
+  LOG_DBG("LIBIDX", "stage: %s", fullPath.c_str());
   entry.pathHash = clixPathHash(fullPath.data(), fullPath.size());
   const int priorIndex = findPrior(st, entry.pathHash);
 
