@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "activities/Activity.h"
+#include "util/AiSourceLanguage.h"
 
 class Section;
 class AiSentencePrefetchSession;
@@ -26,7 +27,8 @@ class AiSentenceTranslationActivity final : public Activity {
  public:
   AiSentenceTranslationActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string sentence,
                                 std::string bookPath, std::string bookLanguage, AiPrefetchOrigin origin,
-                                std::function<void(std::unique_ptr<AiSentencePrefetchSession>, bool)> onHandoff = {});
+                                std::function<void(std::unique_ptr<AiSentencePrefetchSession>, bool)> onHandoff = {},
+                                SourceLanguage sourceLanguage = SourceLanguage::Unknown);
   ~AiSentenceTranslationActivity() override;
   void onEnter() override;
   void onExit() override;
@@ -54,6 +56,7 @@ class AiSentenceTranslationActivity final : public Activity {
   std::string sentence_;
   std::string bookPath_;
   std::string bookLanguage_;
+  SourceLanguage sourceLanguage_ = SourceLanguage::Unknown;
   AiPrefetchOrigin origin_;
   std::unique_ptr<AiSentencePrefetchSession> prefetch_;
   std::function<void(std::unique_ptr<AiSentencePrefetchSession>, bool)> onHandoff_;

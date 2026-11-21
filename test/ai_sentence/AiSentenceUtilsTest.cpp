@@ -29,7 +29,10 @@ int main() {
   assert(!ai_sentence::isRussianText("Hello world"));
   assert(!ai_sentence::isRussianText("Ivan"));
   assert(!ai_sentence::isRussianText("\xD0\xA2\xD0\xBE\xD0\xB2\xD0\xB0 \xD0\xB5 \xD0\xB6\xD0\xB5\xD0\xBD\xD0\xB0."));  // Bulgarian without ъ
-  assert(ai_sentence::isRussianText("\xD1\x81\xD1\x8A\xD0\xB5\xD0\xB7\xD0\xB4"));  // съезд
+  assert(!ai_sentence::isRussianText("\xD1\x81\xD1\x8A\xD0\xB5\xD0\xB7\xD0\xB4"));  // съезд: hard sign is not proof
+  assert(!ai_sentence::isRussianText("\xD1\x81\xD1\x8A\xD0\xB1\xD0\xBE\xD1\x80"));  // събор
+  assert(ai_sentence::isRussianText("\xD0\x81\xD0\xBE\xD0\xB6\xD0\xB8\xD0\xBA"));  // Ёжик
+  assert(ai_sentence::isRussianText("\xD0\x9C\xD0\xAB"));  // МЫ
   assert(ai_sentence::isRussianLanguage("ru"));
   assert(ai_sentence::isRussianLanguage("ru-RU"));
   assert(!ai_sentence::isRussianLanguage("bg"));

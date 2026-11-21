@@ -39,7 +39,9 @@ assert 'append(word_ + " — "' not in src
 assert "ai_book_cache::lookupSentence(" in src
 assert "Pending: waiting for cache server update" in src
 assert "ai_cache_server::active()" in src
-assert "ai_sentence::isRussianLanguage(bookLanguage_)" in src
+assert "sourceAllowed(sourceLanguage_)" in src
+assert "ai_cache_server::timedOut()" in src
+assert "Cache server: timeout" in src
 assert "ai_prefetch::lookupSentence(" in src
 assert "Translate this complete sentence" in src
 print("AI translation popup, scrolling, and selection guards passed")

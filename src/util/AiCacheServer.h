@@ -10,6 +10,7 @@ void tick(bool otherWifiUser = false);
 void pauseForForeground();
 void adoptWifi();
 bool active();
+bool timedOut();
 bool workerPending();
 bool takeUpdated(const std::string& bookPath);
 void cancel();

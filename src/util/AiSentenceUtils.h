@@ -16,26 +16,19 @@ inline bool isRussianLanguage(std::string_view language) {
 }
 
 // Conservative Russian detector: only letters absent from Bulgarian and
-// Ukrainian (ы/ё/э) or a hard sign before a vowel count as proof. Generic
-// Cyrillic text is deliberately NOT classified as Russian.
+// Ukrainian (ы/ё/э, in either case) count as proof. Generic Cyrillic text is
+// deliberately NOT classified as Russian at the sentence level.
 inline bool isRussianText(std::string_view text) {
-  bool russianOnly = false;
   for (size_t i = 0; i + 1 < text.size(); ++i) {
     const unsigned char c = static_cast<unsigned char>(text[i]);
     const unsigned char n = static_cast<unsigned char>(text[i + 1]);
     if (!((c == 0xD0 && n >= 0x80) || (c == 0xD1 && n >= 0x80 && n <= 0x8F))) continue;
     if (text.substr(i, 2) == "\xD1\x91" || text.substr(i, 2) == "\xD1\x8D" ||
         text.substr(i, 2) == "\xD1\x8B" || text.substr(i, 2) == "\xD0\x81" ||
-        text.substr(i, 2) == "\xD0\xAD" || text.substr(i, 2) == "\xD0\xAB") russianOnly = true;
-    if (text.substr(i, 2) == "\xD1\x8A" || text.substr(i, 2) == "\xD0\xAA") {  // ъ/Ъ
-      const std::string_view after = text.substr(i + 2, 2);
-      if (after == "\xD0\xB0" || after == "\xD0\xB5" || after == "\xD0\xB8" || after == "\xD0\xBE" ||
-          after == "\xD0\xB1" || after == "\xD1\x8E" || after == "\xD1\x8F" ||
-          after == "\xD0\x95") russianOnly = true;
-    }
+        text.substr(i, 2) == "\xD0\xAD" || text.substr(i, 2) == "\xD0\xAB") return true;
     ++i;
   }
-  return russianOnly;
+  return false;
 }
 
 inline bool isEnd(const char* word) {

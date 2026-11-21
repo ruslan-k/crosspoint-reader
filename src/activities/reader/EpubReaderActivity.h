@@ -20,6 +20,7 @@
 #include "ReaderActivity.h"
 #include "ReaderToolbarUi.h"
 #include "components/OptionPopup.h"
+#include "util/AiSourceLanguage.h"
 
 class AiSentencePrefetchSession;
 
@@ -28,6 +29,7 @@ class EpubReaderActivity final : public ReaderActivity {
   std::unique_ptr<Epub::SyncMetadata> vocabularyMetadata;
   std::unique_ptr<Section> section = nullptr;
 #if defined(FREEINK_DEVICE_PICCO)
+  SourceLanguage sourceLanguage_ = SourceLanguage::Unknown;
   // The reader, not the popup, owns the background session and its WiFi lease.
   // Up to 25 batches (100 sentences) per book, across popup reanchors.
   static constexpr uint16_t MAX_AI_BACKGROUND_BATCHES = 25;

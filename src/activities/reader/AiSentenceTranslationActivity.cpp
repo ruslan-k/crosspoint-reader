@@ -193,11 +193,13 @@ bool extractTranslationText(const std::string& raw, std::string& sentence) {
 AiSentenceTranslationActivity::AiSentenceTranslationActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                                              std::string sentence, std::string bookPath,
                                                              std::string bookLanguage, AiPrefetchOrigin origin,
-                                                             std::function<void(std::unique_ptr<AiSentencePrefetchSession>, bool)> onHandoff)
+                                                             std::function<void(std::unique_ptr<AiSentencePrefetchSession>, bool)> onHandoff,
+                                                             SourceLanguage sourceLanguage)
     : Activity("AiSentenceTranslation", renderer, mappedInput),
       sentence_(std::move(sentence)),
       bookPath_(std::move(bookPath)),
       bookLanguage_(std::move(bookLanguage)),
+      sourceLanguage_(sourceLanguage),
       origin_(origin),
       onHandoff_(std::move(onHandoff)) {}
 
@@ -322,8 +324,13 @@ void AiSentenceTranslationActivity::onEnter() {
     fail(tr(STR_AI_BAD_RESPONSE));
     return;
   }
-  if (ai_sentence::isRussianLanguage(bookLanguage_) && ai_sentence::isRussianText(sentence_)) {
-    LOG_INF("AI_CACHE", "Skip: Russian source book/sentence");
+  if (!sourceAllowed(sourceLanguage_)) {
+    LOG_INF("AI_CACHE", "Skip: %s source book/sentence", sourceLanguageName(sourceLanguage_));
+    openResult(sentence_);
+    return;
+  }
+  if (ai_sentence::isRussianText(sentence_)) {
+    LOG_INF("AI_CACHE", "Skip: Russian source sentence");
     openResult(sentence_);
     return;
   }
@@ -702,6 +709,11 @@ void AiSentenceTranslationActivity::loop() {
 #if defined(FREEINK_DEVICE_PICCO)
   if (state_ == State::Showing || state_ == State::Error) {
     ai_cache_server::tick(prefetch_ != nullptr);
+    if (state_ == State::Error && ai_cache_server::timedOut() && error_ != "Cache server: timeout") {
+      LOG_INF("AI_CACHE", "Cache server timeout");
+      error_ = "Cache server: timeout";
+      requestUpdate();
+    }
     if (ai_cache_server::takeUpdated(bookPath_)) {
       bool complete = false;
       std::string freshSentence;

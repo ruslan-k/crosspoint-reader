@@ -30,9 +30,10 @@
 #include "AiSentenceTranslationActivity.h"
 #if defined(FREEINK_DEVICE_PICCO)
 #include "AiSentencePrefetchSession.h"
-#include "util/AiSentenceUtils.h"
 #include "util/AiBookCache.h"
 #include "util/AiCacheServer.h"
+#include "util/AiSentenceUtils.h"
+#include "util/AiSourceLanguage.h"
 #endif
 #include "BookmarkEntry.h"
 #include "ChapterBuildGate.h"
@@ -243,6 +244,40 @@ ClipSelectionActivity::Selection lookupReturnSelectionFor(const ClippingResult& 
   return {0, 0, clipping.startWordIndex, clipping.endWordIndex, true};
 }
 
+#if defined(FREEINK_DEVICE_PICCO)
+// Bounded local sampling: four spine items, at most 12 KB of text each. No
+// XHTML is buffered; a short write stops ZipFile::readFileToStream early.
+SourceLanguage detectSourceLanguage(Epub& epub) {
+  LanguageCounters counters;
+  const int count = epub.getSpineItemsCount();
+  if (count <= 0) return classifySourceLanguage(counters, epub.getLanguage());
+  const int indices[4] = {0, count / 3, count * 2 / 3, count - 1};
+  int seen[4] = {};
+  for (int pos = 0; pos < 4; ++pos) {
+    const int index = indices[pos];
+    if (index < 0 || index >= count) continue;
+    bool duplicate = false;
+    for (int j = 0; j < pos; ++j) {
+      if (seen[j] == index) duplicate = true;
+    }
+    if (duplicate) continue;
+    seen[pos] = index;
+    LanguageProbe probe(12288);
+    const auto item = epub.getSpineItem(index);
+    if (item.href.empty() || !epub.readItemContentsToStream(item.href, probe, 1024, true)) {
+      LOG_INF("AI_LANG", "sample read failed spine=%d", index);
+      return SourceLanguage::Unknown;
+    }
+    counters.add(probe.counters());
+  }
+  const SourceLanguage language = classifySourceLanguage(counters, epub.getLanguage());
+  LOG_INF("AI_LANG", "detected=%s meta=%s cyr=%u ru=%u uk=%u han=%u lat=%u",
+          sourceLanguageName(language), epub.getLanguage().c_str(), counters.cyrillic, counters.ruUnique,
+          counters.ukUnique, counters.han, counters.latin);
+  return language;
+}
+#endif
+
 }  // namespace
 
 EpubReaderActivity::~EpubReaderActivity() {
@@ -446,9 +481,9 @@ bool EpubReaderActivity::loadBook() {
   // Start automatically for a missing whole-book package. No SHA scan or
   // networking in this loading path; the idle worker handles both.
   AI_TRANSLATION_STORE.loadFromFile();
-  const bool russianBook = ai_sentence::isRussianLanguage(epub->getLanguage());
-  if (russianBook) {
-    LOG_INF("AI_SRV", "skip: Russian source book");
+  sourceLanguage_ = detectSourceLanguage(*epub);
+  if (!sourceAllowed(sourceLanguage_)) {
+    LOG_INF("AI_SRV", "skip: %s source book", sourceLanguageName(sourceLanguage_));
   } else if (ai_book_cache::needsServer(bookPath))
     ai_cache_server::watch(bookPath, AI_TRANSLATION_STORE.getCacheServerUrl(),
                             AI_TRANSLATION_STORE.getCacheServerToken());
@@ -806,7 +841,11 @@ void EpubReaderActivity::startClipSelection(const int initialX, const int initia
           renderer, mappedInput, clipping.sentence, bookPath, epub->getLanguage(),
           AiPrefetchOrigin{section.get(), spineIndex, startPage, clipping.sentenceStartOffset,
                             clipping.startOffset},
-          std::move(onHandoff));
+          std::move(onHandoff)
+#if defined(FREEINK_DEVICE_PICCO)
+          , sourceLanguage_
+#endif
+      );
       if (!translation) {
         LOG_ERR("AI", "Insufficient memory for translation screen");
         requestUpdate();

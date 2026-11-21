@@ -36,6 +36,7 @@
 namespace ai_cache_server {
 namespace {
 constexpr uint32_t POLL_INTERVAL_MS = 15000;
+constexpr uint32_t NO_PROGRESS_TIMEOUT_MS = 600000;
 constexpr uint32_t WIFI_JOIN_TIMEOUT_MS = 12000;
 constexpr uint32_t MIN_INTERNAL_FREE = 94 * 1024;
 constexpr uint32_t MIN_INTERNAL_BLOCK = 36 * 1024;
@@ -81,6 +82,9 @@ struct State {
   uint32_t pendingDone = 0;
   uint32_t nextPollAt = 0;
   uint32_t joiningAt = 0;
+  uint32_t lastProgressAt = 0;
+  bool timeoutPending = false;
+  bool timedOut = false;
   bool wifiOwned = false;
   bool joining = false;
   bool terminal = false;
@@ -449,9 +453,11 @@ void watch(const std::string& bookPath, const std::string& baseUrl, const std::s
   state.baseUrl = baseUrl;
   state.token = token;
   state.nextPollAt = millis();
+  state.lastProgressAt = millis();
 }
 
 bool active() { return !state.bookPath.empty() && !state.terminal; }
+bool timedOut() { return state.timedOut; }
 bool workerPending() { return state.worker && !state.worker->done.load(std::memory_order_acquire); }
 
 void adoptWifi() {
@@ -469,11 +475,27 @@ void pauseForForeground() {
 bool takeUpdated(const std::string& bookPath) {
   if (state.bookPath != bookPath || !state.updated) return false;
   state.updated = false;
+  state.lastProgressAt = millis();
   return true;
 }
 
 void tick(bool otherWifiUser) {
   if (!active()) return;
+  if (state.lastProgressAt && millis() - state.lastProgressAt >= NO_PROGRESS_TIMEOUT_MS) {
+    if (state.worker) {
+      if (!state.timeoutPending) {
+        state.worker->cancel.store(true, std::memory_order_release);
+        if (state.wifiOwned) state.worker->shutdownWifiOnExit.store(true, std::memory_order_release);
+        state.timeoutPending = true;
+      }
+    } else {
+      LOG_INF("AI_SRV", "error: no_progress_timeout");
+      state.terminal = true;
+      state.timedOut = true;
+      if (!otherWifiUser) releaseWifi();
+      return;
+    }
+  }
   if (state.worker) {
     if (!state.worker->done.load(std::memory_order_acquire) || ai_http_gate::busy()) return;
     auto job = std::move(state.worker);
@@ -482,6 +504,11 @@ void tick(bool otherWifiUser) {
       memcpy(state.bookSha, job->bookSha, sizeof(state.bookSha));
     }
     if (job->cancel.load()) {
+      if (state.timeoutPending) {
+        LOG_INF("AI_SRV", "error: no_progress_timeout");
+        state.terminal = true;
+        state.timedOut = true;
+      }
       state.step = Step::Status;
       state.nextPollAt = millis() + POLL_INTERVAL_MS;
     } else if (!job->succeeded) {
@@ -492,6 +519,7 @@ void tick(bool otherWifiUser) {
         state.updated = true;
         state.lastDone = state.pendingDone;
       }
+      if (job->changed || job->doneCount > state.lastDone) state.lastProgressAt = millis();
       state.step = job->next;
       if (job->step == Step::Status) {
         state.aicSha = job->expectedAicSha;
@@ -555,6 +583,7 @@ void tick(bool) {}
 void pauseForForeground() {}
 void adoptWifi() {}
 bool active() { return false; }
+bool timedOut() { return false; }
 bool workerPending() { return false; }
 bool takeUpdated(const std::string&) { return false; }
 void cancel() {}
