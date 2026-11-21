@@ -446,8 +446,11 @@ bool EpubReaderActivity::loadBook() {
   // networking in this loading path; the idle worker handles both.
   AI_TRANSLATION_STORE.loadFromFile();
   const std::string& bookLanguage = epub->getLanguage();
-  if (bookLanguage.rfind("ru", 0) == 0) {
-    LOG_INF("AI_SRV", "skip: Russian source book");
+  static constexpr const char* kCyrillicLanguages[] = {"ru", "bg", "uk", "be", "kk", "mk", "sr", "ky", "tt", "mn", "uz"};
+  const bool cyrillicBook = std::any_of(std::begin(kCyrillicLanguages), std::end(kCyrillicLanguages),
+                                        [&](const char* prefix) { return bookLanguage.rfind(prefix, 0) == 0; });
+  if (cyrillicBook) {
+    LOG_INF("AI_SRV", "skip: Cyrillic source book");
   } else if (ai_book_cache::needsServer(bookPath))
     ai_cache_server::watch(bookPath, AI_TRANSLATION_STORE.getCacheServerUrl(),
                             AI_TRANSLATION_STORE.getCacheServerToken());
