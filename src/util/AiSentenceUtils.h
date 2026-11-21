@@ -9,16 +9,29 @@
 // handled by ClipSelectionActivity.
 namespace ai_sentence {
 
-// Skip translation for already-Russian source text (UTF-8 Cyrillic).
-// Three letters is enough to avoid tripping on a lone Cyrillic name.
+// Skip translation for Cyrillic source text, but allow Bulgarian (bg->ru).
+// Russian ы/ё/э are absent in Bulgarian; Bulgarian ъ is frequent, Russian hard
+// sign is rare. Three letters avoids tripping on a lone Cyrillic name.
 inline bool isRussianText(std::string_view text) {
-  size_t letters = 0;
-  for (size_t i = 0; i + 1 < text.size() && letters < 3; ++i) {
+  size_t letters = 0, hardSigns = 0;
+  bool russianOnly = false;
+  for (size_t i = 0; i + 1 < text.size(); ++i) {
     const unsigned char c = static_cast<unsigned char>(text[i]);
     const unsigned char n = static_cast<unsigned char>(text[i + 1]);
-    if ((c == 0xD0 && n >= 0x80) || (c == 0xD1 && n >= 0x80 && n <= 0x8F)) ++letters;
+    if (!((c == 0xD0 && n >= 0x80) || (c == 0xD1 && n >= 0x80 && n <= 0x8F))) continue;
+    ++letters;
+    if (text.substr(i, 2) == "\xD1\x91" || text.substr(i, 2) == "\xD1\x8D" ||
+        text.substr(i, 2) == "\xD1\x8B") russianOnly = true;
+    if (text.substr(i, 2) == "\xD1\x8A") {  // ъ
+      ++hardSigns;
+      const std::string_view after = text.substr(i + 2, 2);
+      if (after == "\xD0\xB0" || after == "\xD0\xB5" || after == "\xD0\xB8" || after == "\xD0\xBE" ||
+          after == "\xD0\xB1" || after == "\xD1\x8E" || after == "\xD1\x8F") russianOnly = true;
+    }
+    ++i;
   }
-  return letters >= 3;
+  if (russianOnly) return true;
+  return letters >= 3 && hardSigns == 0;
 }
 
 inline bool isEnd(const char* word) {
