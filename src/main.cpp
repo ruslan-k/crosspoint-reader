@@ -1069,6 +1069,14 @@ void loop() {
             AI_TRANSLATION_STORE.getCacheServerUrl(), tok,
             /*replaceCacheServerToken=*/true);
         logSerial.printf("AI_TOKEN_RESULT:%s\n", ok ? "ok" : "fail");
+      } else if (cmd.startsWith("AI_URL:")) {
+        const std::string url(cmd.substring(7).c_str());
+        const bool ok = AI_TRANSLATION_STORE.configure(
+            AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel(),
+            AI_TRANSLATION_STORE.getKey(), /*replaceKey=*/false,
+            AI_TRANSLATION_STORE.getReasoningEffort(), url,
+            AI_TRANSLATION_STORE.getCacheServerToken(), /*replaceCacheServerToken=*/false);
+        logSerial.printf("AI_URL_RESULT:%s\n", ok ? "ok" : "fail");
       }
     }
   }
