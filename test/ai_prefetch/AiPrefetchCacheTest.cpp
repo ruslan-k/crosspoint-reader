@@ -1,12 +1,9 @@
 #include <HalStorage.h>
 #include <gtest/gtest.h>
-
 #include <filesystem>
 #include <fstream>
 #include <string>
-
 #include "AiPrefetchCache.h"
-
 using namespace ai_prefetch;
 
 class AiPrefetchCacheTest : public ::testing::Test {
@@ -21,8 +18,6 @@ class AiPrefetchCacheTest : public ::testing::Test {
     s.end = 116;
     s.source = "Destroy him.";
     s.translation = "Уничтожь его.";
-    s.words.push_back({100, "Destroy", "Уничтожь"});
-    s.words.push_back({108, "him.", "его."});
     return s;
   }
 };
@@ -32,17 +27,14 @@ TEST_F(AiPrefetchCacheTest, WindowAndBatchBound) {
   EXPECT_EQ(BATCH_SENTENCES, 4u);
 }
 
-TEST_F(AiPrefetchCacheTest, ExactHitAndWordOffsets) {
+TEST_F(AiPrefetchCacheTest, SentenceHitNeedsNoWordMapping) {
   auto s = record();
   ASSERT_TRUE(save(scope(), s));
-  EXPECT_TRUE(has(scope(), s));
-  std::string word, sentence;
-  EXPECT_TRUE(lookup(scope(), s, 100, "Destroy", word, sentence));
-  EXPECT_EQ(word, "Уничтожь");
-  EXPECT_EQ(sentence, "Уничтожь его.");
-  EXPECT_FALSE(lookup(scope(), s, 100, "him.", word, sentence));
-  EXPECT_TRUE(lookup(scope(), s, 108, "him.", word, sentence));
-  EXPECT_EQ(word, "его.");
+  std::string translation;
+  ASSERT_TRUE(lookupSentence(scope(), s, translation));
+  EXPECT_EQ(translation, "Уничтожь его.");
+  Sentence delta;
+  EXPECT_FALSE(pending(scope(), s, delta));
 }
 
 TEST_F(AiPrefetchCacheTest, WrongBookModelSpineAndOffsetMiss) {
@@ -69,19 +61,18 @@ TEST_F(AiPrefetchCacheTest, CorruptionFailsClosed) {
   auto s = record();
   ASSERT_TRUE(save(scope(), s));
   std::filesystem::path item;
-  for (const auto& entry : std::filesystem::recursive_directory_iterator(HalStorage::root())) {
-    if (entry.path().extension() == ".bin") {
-      item = entry.path();
-      break;
-    }
+  for (const auto& e : std::filesystem::recursive_directory_iterator(HalStorage::root())) {
+    if (e.path().extension() == ".bin") { item = e.path(); break; }
   }
   ASSERT_FALSE(item.empty());
   {
-    std::fstream file(item, std::ios::binary | std::ios::in | std::ios::out);
-    file.seekp(-1, std::ios::end);
-    file.put('X');
+    std::fstream f(item, std::ios::binary | std::ios::in | std::ios::out);
+    f.seekp(-1, std::ios::end);
+    f.put('X');
   }
   EXPECT_FALSE(has(scope(), s));
+  Sentence delta;
+  EXPECT_TRUE(pending(scope(), s, delta));
 }
 
 TEST_F(AiPrefetchCacheTest, DurableCheckpointIsOnlyAdvisory) {
@@ -95,11 +86,11 @@ TEST_F(AiPrefetchCacheTest, DurableCheckpointIsOnlyAdvisory) {
   EXPECT_EQ(loaded.anchor, 99u);
   EXPECT_EQ(loaded.nextOffset, 116u);
   EXPECT_EQ(loaded.scanned, 4u);
-  for (const auto& entry : std::filesystem::recursive_directory_iterator(HalStorage::root())) {
-    if (entry.path().filename() == "checkpoint.bin") {
-      std::fstream file(entry.path(), std::ios::binary | std::ios::in | std::ios::out);
-      file.seekp(0);
-      file.put('X');
+  for (const auto& e : std::filesystem::recursive_directory_iterator(HalStorage::root())) {
+    if (e.path().filename() == "checkpoint.bin") {
+      std::fstream f(e.path(), std::ios::binary | std::ios::in | std::ios::out);
+      f.seekp(0);
+      f.put('X');
     }
   }
   EXPECT_FALSE(loadCheckpoint(scope(), loaded));
@@ -108,77 +99,37 @@ TEST_F(AiPrefetchCacheTest, DurableCheckpointIsOnlyAdvisory) {
 
 TEST_F(AiPrefetchCacheTest, InvalidEntriesDoNotGetWritten) {
   auto s = record();
-  s.words[1].translation.clear();
-  EXPECT_FALSE(save(scope(), s));
-  EXPECT_FALSE(has(scope(), s));
-  s = record();
   s.source.resize(MAX_SENTENCE_BYTES + 1, 'A');
   EXPECT_FALSE(save(scope(), s));
+  EXPECT_FALSE(has(scope(), s));
 }
 
-// A streamed reply can provide the sentence long before all word translations.
-TEST_F(AiPrefetchCacheTest, PartialSentenceAndWordUpdatesMergeAtomically) {
-  auto original = record();
-  Sentence first = original;
-  first.words.clear();
-  ASSERT_TRUE(save(scope(), first));
-  EXPECT_TRUE(has(scope(), original));
+TEST_F(AiPrefetchCacheTest, LegacyWordMappingsAreNotRequired) {
+  auto s = record();
+  s.words.push_back({100, "Destroy", "Уничтожь"});
+  ASSERT_TRUE(save(scope(), s));
   Sentence delta;
-  ASSERT_TRUE(pending(scope(), original, delta));
-  EXPECT_EQ(delta.translation, first.translation);
-  ASSERT_EQ(delta.words.size(), 2u);
-
-  Sentence oneWord = original;
-  oneWord.translation.clear();
-  oneWord.words.resize(1);
-  ASSERT_TRUE(save(scope(), oneWord));
-  ASSERT_TRUE(pending(scope(), original, delta));
-  EXPECT_EQ(delta.translation, first.translation);
-  ASSERT_EQ(delta.words.size(), 1u);
-  EXPECT_EQ(delta.words[0].offset, 108u);
-
-  // Missing the sentence is not a valid full translation cache hit.
-  std::string word, sentence;
-  EXPECT_TRUE(lookup(scope(), original, 100, "Destroy", word, sentence));
-  EXPECT_FALSE(lookup(scope(), original, 108, "him.", word, sentence));
-
-  Sentence secondWord = original;
-  secondWord.translation.clear();
-  secondWord.words.erase(secondWord.words.begin());
-  ASSERT_TRUE(save(scope(), secondWord));
-  EXPECT_FALSE(pending(scope(), original, delta));
-  EXPECT_TRUE(lookup(scope(), original, 108, "him.", word, sentence));
+  EXPECT_FALSE(pending(scope(), s, delta));
+  std::string translation;
+  EXPECT_TRUE(lookupSentence(scope(), s, translation));
+  EXPECT_EQ(translation, "Уничтожь его.");
+  s.words.push_back({108, "him.", ""});
+  EXPECT_FALSE(pending(scope(), s, delta));
 }
 
-TEST_F(AiPrefetchCacheTest, WordOnlyRecordAndSentenceMerge) {
-  auto original = record();
-  Sentence first = original;
-  first.translation.clear();
-  first.words.resize(1);
-  ASSERT_TRUE(save(scope(), first));
-  std::string word, sentence;
-  EXPECT_FALSE(lookup(scope(), original, 100, "Destroy", word, sentence));
+TEST_F(AiPrefetchCacheTest, WordOnlyRecordNeedsSentenceTranslation) {
+  auto s = record();
+  s.translation.clear();
+  s.words.push_back({100, "Destroy", "Уничтожь"});
+  ASSERT_TRUE(save(scope(), s));
+  std::string translation;
+  EXPECT_FALSE(lookupSentence(scope(), s, translation));
   Sentence delta;
-  ASSERT_TRUE(pending(scope(), original, delta));
+  EXPECT_TRUE(pending(scope(), s, delta));
+  EXPECT_TRUE(delta.words.empty());
   EXPECT_TRUE(delta.translation.empty());
-  ASSERT_EQ(delta.words.size(), 1u);
-  EXPECT_EQ(delta.words[0].offset, 108u);
-
-  Sentence translated = original;
-  translated.words.clear();
-  ASSERT_TRUE(save(scope(), translated));
-  EXPECT_TRUE(lookup(scope(), original, 100, "Destroy", word, sentence));
-  EXPECT_TRUE(pending(scope(), original, delta));
-  EXPECT_EQ(delta.words.size(), 1u);
-}
-
-TEST_F(AiPrefetchCacheTest, CorruptPartialDoesNotCountAsComplete) {
-  auto original = record();
-  Sentence incomplete = original;
-  incomplete.words.clear();
-  ASSERT_TRUE(save(scope(), incomplete));
-  Sentence delta;
-  EXPECT_TRUE(pending(scope(), original, delta));
-  ASSERT_EQ(delta.words.size(), original.words.size());
-  EXPECT_EQ(delta.translation, incomplete.translation);
+  s = record();
+  ASSERT_TRUE(save(scope(), s));
+  EXPECT_FALSE(pending(scope(), s, delta));
+  EXPECT_TRUE(lookupSentence(scope(), s, translation));
 }

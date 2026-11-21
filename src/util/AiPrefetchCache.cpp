@@ -182,38 +182,17 @@ bool pending(const Scope& scope, const Sentence& fullSentence, Sentence& delta) 
   if (!safeSentence(fullSentence, false)) return false;
   delta = fullSentence;
   delta.translation.clear();
+  delta.words.clear();
   Sentence stored;
-  if (readRecord(scope, fullSentence, stored)) {
-    delta.translation = stored.translation;
-    delta.words.clear();
-    for (const Word& expected : fullSentence.words) {
-      const auto translated = std::find_if(stored.words.begin(), stored.words.end(), [&](const Word& saved) {
-        return saved.offset == expected.offset && saved.source == expected.source && !saved.translation.empty();
-      });
-      if (translated == stored.words.end()) {
-        Word missing = expected;
-        missing.translation.clear();
-        delta.words.push_back(std::move(missing));
-      }
-    }
-  } else {
-    for (Word& word : delta.words) word.translation.clear();
-  }
-  // Complete sentence and full word map are already durable.
-  return delta.translation.empty() || !delta.words.empty();
+  if (readRecord(scope, fullSentence, stored) && !stored.translation.empty()) return false;
+  return true;
 }
 
-bool lookup(const Scope& scope, const Sentence& sentence, uint32_t selectedOffset, std::string_view selectedWord,
-            std::string& translatedWord, std::string& translatedSentence) {
+bool lookupSentence(const Scope& scope, const Sentence& sentence, std::string& translatedSentence) {
+  translatedSentence.clear();
   Sentence loaded;
-  if (!readRecord(scope, sentence, loaded)) return false;
-  const auto word = std::find_if(loaded.words.begin(), loaded.words.end(), [&](const Word& item) {
-    return item.offset == selectedOffset && item.source == selectedWord;
-  });
-  if (word == loaded.words.end() || loaded.translation.empty() || word->translation.empty())
-    return false;  // Never invent a word mapping or a missing sentence translation.
-  translatedWord = word->translation;
-  translatedSentence = loaded.translation;
+  if (!readRecord(scope, sentence, loaded) || loaded.translation.empty()) return false;
+  translatedSentence = std::move(loaded.translation);
   return true;
 }
 

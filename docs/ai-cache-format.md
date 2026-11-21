@@ -34,7 +34,7 @@ the EPUB and package unencrypted.
 Logs under `[AI_SRV]`: `disabled`, `job queued sha=...`,
 `progress done/total`, `downloaded bytes=... complete=0/1`, and
 `error: reason`. No book text or API key is logged. An incomplete .aic
-snapshot is usable, but only validated sentence/word records are returned.
+snapshot is usable, but only validated sentence translations are returned.
 
 ## Install and lifecycle
 
@@ -100,15 +100,20 @@ record placement. Each record must be inside the file and start at or after
 | translation | translated_bytes bytes | translated sentence UTF-8 |
 | word entries | variable | each entry below, concatenated |
 
-Each word entry is **8 header bytes** followed by its source and translation:
+**Sentence-only mode:** emit `word_count=0` and no word entries. The
+`CPAICPK1` version, header, index, CRC and record layout remain unchanged.
+The selected word and `wordOccurrence` are no longer required for lookup.
+
+Legacy records may contain word entries. Their lengths and CRC are still
+validated, but they do not affect sentence-only hits. Each legacy word entry
+is **8 header bytes** followed by its source and translation:
 `<u16 occurrence, u16 source_bytes, u16 translated_bytes, u16 reserved=0>`,
 then `source_bytes` of normalized UTF-8 visible source word (1..160), then
 `translated_bytes` of its contextual translation (1..256). `occurrence`
 is **zero-based among tokens whose normalized visible source word is exactly
 equal**, counted in the original logical order of this sentence. Thus the
-second `had` is `("had",1)`, independent of other tokens. Include a mapping
-for **every selectable word** for a full cache. Duplicate source word and
-occurrence pairs must not be generated.
+second `had` is `("had",1)`, independent of other tokens. Word entries are optional legacy data. If present, duplicate source
+word/occurrence pairs must not be generated.
 
 All CRC32s are standard CRC-32/ISO-HDLC (IEEE, zlib-compatible):
 initial state `0xffffffff`, reflected polynomial `0xedb88320`, final XOR
@@ -144,23 +149,23 @@ key = 0xcbf29ce484222325
 for b in normalized_sentence.encode("utf-8"):
     key = ((key ^ b) * 0x100000001b3) & ((1 << 64) - 1)
 
-word_entry = struct.pack("<HHHH", occurrence, len(word_utf8),
-                         len(word_ru_utf8), 0) + word_utf8 + word_ru_utf8
+# No per-word output is necessary.
+word_count = 0
 record = (struct.pack("<IIHHI", len(sentence_utf8), len(sentence_ru_utf8),
                       word_count, 0, 0) +
-          sentence_utf8 + sentence_ru_utf8 + b"".join(word_entries))
+          sentence_utf8 + sentence_ru_utf8)
 index_entry = struct.pack("<QQII", key, record_offset, len(record),
                           zlib.crc32(record))
 ```
 
 Do not use Python `str.split()` alone for normalization or token discovery;
 it does not guarantee matching the firmware's exact whitespace/token rules.
-Sample small batches and compare hash + selected-word occurrence on the device.
+Sample small batches and compare sentence hashes on the device.
 
 ## COMPLETE semantics and failure handling
 
-Set flag bit 0 **only if the host has translated every extracted sentence
-and every selectable word**, with no missing, truncated or invalid output.
+Set flag bit 0 **only if the host has translated every extracted sentence**,
+with no missing, truncated or invalid output. Word entries are optional.
 Repeated identical sentences may share a single record: this is a
 content-addressed cache, so their contextual translations will be the same
 at each occurrence. If different context matters, choose a generic translation
@@ -169,9 +174,9 @@ or wait for a future position-disambiguated version of the format.
 The device validates magic, version, bounds, header/index CRC, raw EPUB SHA-256
 and individual record CRC/length before serving a hit. It reads one index
 entry per binary-search step using seek and never loads the entire package into
-RAM. Only a matching, validated word+sentence pair is accepted. Any miss,
-unsupported selected token or damaged record falls back through existing
-caches and then to online translation. A **valid COMPLETE package** disables
+RAM. Only the normalized source sentence needs to match. Missing sentences
+and damaged records fall back through existing caches and online translation.
+A **valid COMPLETE package** disables
 new Picco lookahead prefetch jobs even on individual misses, as the host is
 responsible for coverage; remove/replace the package to resume lookahead.
 
@@ -194,8 +199,7 @@ The package is not authenticated: CRC protects against accidental corruption,
 [AI_PACK] rejected: invalid header, index or checksum
 [AI_CACHE] Book package cache hit
 [AI_CACHE] Book package miss: sentence_missing
-[AI_CACHE] Book package miss: word_missing
-[AI_CACHE] Online fallback: word_missing
+[AI_CACHE] Online fallback: sentence_missing
 [AI_PRE] Disabled: complete book package
 ```
 

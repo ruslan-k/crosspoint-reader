@@ -38,12 +38,10 @@ struct Sentence {
 // All lookups validate content, scope, lengths and checksums, not just hashes.
 // SD access is permitted only inside Translate (never on a page-turn path).
 bool has(const Scope& scope, const Sentence& sentence);
-// Build a minimal delta: only source words whose position/text are not already
-// cached, plus the existing sentence translation when present. false = complete.
-// A missing/corrupt record is treated as an empty cache; never trust checkpoints.
+// Sentence-only deduplication. A missing/corrupt record must be retranslated.
+// Legacy stored word maps remain readable, but new requests do not need them.
 bool pending(const Scope& scope, const Sentence& fullSentence, Sentence& delta);
-bool lookup(const Scope& scope, const Sentence& sentence, uint32_t selectedOffset, std::string_view selectedWord,
-            std::string& translatedWord, std::string& translatedSentence);
+bool lookupSentence(const Scope& scope, const Sentence& sentence, std::string& translatedSentence);
 // Merge a validated sentence and/or a subset of translated words into the
 // previous atomic record. Existing complete translations are never lost.
 bool save(const Scope& scope, const Sentence& sentence);

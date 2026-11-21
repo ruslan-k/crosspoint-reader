@@ -248,13 +248,12 @@ bool skip(HalFile& file, size_t bytes, uint64_t& remaining, uint32_t& crc) {
   return true;
 }
 
-enum class ReadStatus { Hit, WrongSource, NoWord, Corrupt };
+enum class ReadStatus { Hit, WrongSource, Corrupt };
 
 // Read only a single record. No entire-book allocations; check its CRC before
 // exposing any translated text. Duplicate hash collisions verify source bytes.
 ReadStatus readRecord(HalFile& file, const Index& index, std::string_view source,
-                      std::string_view selectedWord, uint16_t occurrence,
-                      std::string& wordTranslation, std::string& sentenceTranslation) {
+                      std::string& sentenceTranslation) {
   if (!file.seek64(index.offset)) return ReadStatus::Corrupt;
   uint64_t remaining = index.length;
   uint32_t crc = UINT32_C(0xffffffff);
@@ -275,38 +274,20 @@ ReadStatus readRecord(HalFile& file, const Index& index, std::string_view source
   std::string sentenceOut(translatedBytes, '\0');
   if (!consume(file, sentenceOut.data(), translatedBytes, remaining, crc)) return ReadStatus::Corrupt;
 
-  std::string wordOut;
-  uint32_t unknownMatches = 0;
-  bool matched = false;
+  // Old v1 records may contain word entries. Validate their structure and
+  // entire-record CRC, but never require a selected-word mapping for a hit.
   for (uint16_t i = 0; i < wordCount; ++i) {
     uint8_t wh[8];
     if (!consume(file, wh, sizeof(wh), remaining, crc)) return ReadStatus::Corrupt;
-    const uint16_t position = le16(wh);
     const uint16_t sourceSize = le16(wh + 2);
     const uint16_t translationSize = le16(wh + 4);
     if (le16(wh + 6) != 0 || !sourceSize || sourceSize > MAX_WORD_SOURCE ||
         !translationSize || translationSize > MAX_WORD_TRANSLATION ||
-        static_cast<uint64_t>(sourceSize) + translationSize > remaining)
+        static_cast<uint64_t>(sourceSize) + translationSize > remaining ||
+        !skip(file, static_cast<size_t>(sourceSize) + translationSize, remaining, crc))
       return ReadStatus::Corrupt;
-    std::string wordSource(sourceSize, '\0');
-    if (!consume(file, wordSource.data(), sourceSize, remaining, crc)) return ReadStatus::Corrupt;
-    const bool sameWord = wordSource == selectedWord;
-    const bool wanted = sameWord && (position == occurrence || occurrence == UINT16_MAX);
-    if (wanted) {
-      std::string translated(translationSize, '\0');
-      if (!consume(file, translated.data(), translationSize, remaining, crc)) return ReadStatus::Corrupt;
-      ++unknownMatches;
-      if (!matched) wordOut = std::move(translated);
-      matched = true;
-    } else if (!skip(file, translationSize, remaining, crc)) {
-      return ReadStatus::Corrupt;
-    }
   }
-  if (remaining || (crc ^ UINT32_C(0xffffffff)) != index.crc)
-    return ReadStatus::Corrupt;
-  if (!matched || (occurrence == UINT16_MAX && unknownMatches != 1))
-    return ReadStatus::NoWord;
-  wordTranslation = std::move(wordOut);
+  if (remaining || (crc ^ UINT32_C(0xffffffff)) != index.crc) return ReadStatus::Corrupt;
   sentenceTranslation = std::move(sentenceOut);
   return ReadStatus::Hit;
 }
@@ -357,22 +338,17 @@ const char* resultName(Result result) {
     case Result::BookMismatch: return "book_id_mismatch";
     case Result::LowMemory: return "low_memory";
     case Result::SentenceMissing: return "sentence_missing";
-    case Result::WordMissing: return "word_missing";
     case Result::CorruptRecord: return "record_crc_or_length";
   }
   return "unknown";
 }
 
-Result lookup(const std::string& bookPath, std::string_view selectedWord, std::string_view sentence,
-              uint16_t wordOccurrence, std::string& translatedWord,
-              std::string& translatedSentence, bool& complete) {
+Result lookupSentence(const std::string& bookPath, std::string_view sentence,
+                      std::string& translatedSentence, bool& complete) {
   std::lock_guard<std::mutex> guard(packageMutex);
   complete = false;
-  translatedWord.clear();
   translatedSentence.clear();
-  if (sentence.empty() || sentence.size() > MAX_SOURCE || selectedWord.empty() ||
-      selectedWord.size() > MAX_WORD_SOURCE)
-    return Result::SentenceMissing;
+  if (sentence.empty() || sentence.size() > MAX_SOURCE) return Result::SentenceMissing;
   const std::string packagePath = bookPath + ".aic";
   if (!Storage.exists(packagePath.c_str())) {
     if (recent.path == bookPath) recent.complete = false;
@@ -410,10 +386,7 @@ Result lookup(const std::string& bookPath, std::string_view selectedWord, std::s
           id, static_cast<unsigned>(header.count), complete ? 1u : 0u);
 
   std::string normalized = normalize(sentence);
-  std::string word = normalize(selectedWord);
-  if (normalized.empty() || normalized.size() > MAX_SOURCE || word.empty() ||
-      word.size() > MAX_WORD_SOURCE)
-    return Result::SentenceMissing;
+  if (normalized.empty() || normalized.size() > MAX_SOURCE) return Result::SentenceMissing;
   const uint64_t hash = sentenceHash(normalized);
   uint32_t lo = 0, hi = header.count;
   uint8_t row[INDEX_BYTES];
@@ -424,19 +397,16 @@ Result lookup(const std::string& bookPath, std::string_view selectedWord, std::s
     if (le64(row) < hash) lo = mid + 1;
     else hi = mid;
   }
-  bool sourceFound = false;
   // A deliberate hash collision can have adjacent rows. Cap adversarial runs.
   for (uint32_t n = lo; n < header.count && n - lo < 64; ++n) {
     if (!readAt(file, HEADER_BYTES + static_cast<uint64_t>(n) * INDEX_BYTES, row, sizeof(row)))
       return Result::InvalidPackage;
     const Index index = decodeIndex(row);
     if (index.hash != hash) break;
-    const auto status = readRecord(file, index, normalized, word, wordOccurrence,
-                                   translatedWord, translatedSentence);
+    const auto status = readRecord(file, index, normalized, translatedSentence);
     if (status == ReadStatus::Hit) return Result::Hit;
     if (status == ReadStatus::Corrupt) return Result::CorruptRecord;
-    if (status == ReadStatus::NoWord) sourceFound = true;
   }
-  return sourceFound ? Result::WordMissing : Result::SentenceMissing;
+  return Result::SentenceMissing;
 }
 }  // namespace ai_book_cache

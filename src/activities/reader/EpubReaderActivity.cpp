@@ -798,9 +798,9 @@ void EpubReaderActivity::startClipSelection(const int initialX, const int initia
       };
 #endif
       auto translation = makeUniqueNoThrow<AiSentenceTranslationActivity>(
-          renderer, mappedInput, clipping.text, clipping.sentence, bookPath,
+          renderer, mappedInput, clipping.sentence, bookPath,
           AiPrefetchOrigin{section.get(), spineIndex, startPage, clipping.sentenceStartOffset,
-                            clipping.startOffset, clipping.wordOccurrence},
+                            clipping.startOffset},
           std::move(onHandoff));
       if (!translation) {
         LOG_ERR("AI", "Insufficient memory for translation screen");

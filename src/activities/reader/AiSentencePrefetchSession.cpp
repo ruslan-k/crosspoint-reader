@@ -266,28 +266,18 @@ bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, 
   auto promptBuffer = HalMemory::allocatePsram(17 * 1024);
   if (!promptBuffer || !body) return false;
   ai_prefetch::BoundedJsonWriter prompt(reinterpret_cast<char*>(promptBuffer.get()), 17 * 1024);
-  if (!prompt.append("Translate the numbered source text into Russian. Return one compact, standalone JSON object "
-                     "per sentence (NDJSON), in increasing id order, as soon as each is ready. "
-                     "Schema: {\"id\":0,\"translation\":\"...\",\"words\":[{\"i\":0,\"translation\":\"...\"}]}. "
-                     "Omit the sentence translation if need_sentence=false. The words arrays contain "
-                     "ONLY missing contextual word translations; return all you can without placeholders, "
-                     "unnecessary explanations, markdown fences or an enclosing items array. "
-                     "Each word translation should be brief. No analysis, reasoning or explanations. Begin with the first id JSON object. Each line must be standalone JSON. Source:\n{\"sentences\":["))
+  if (!prompt.append("Translate each numbered sentence into natural, faithful Russian. "
+                     "Return one standalone JSON object per line (NDJSON) in id order, "
+                     "as soon as it is ready: {\"id\":0,\"translation\":\"...\"}. "
+                     "Translate the whole sentence, preserving tone and punctuation. "
+                     "No analysis, word mappings, explanations, markdown or enclosing array. "
+                     "Source: {\"sentences\":["))
     return false;
   for (size_t i = 0; i < batch.size(); ++i) {
     if (i && !prompt.append(",")) return false;
-    if (!prompt.append("{\"id\":") || !prompt.integer(static_cast<unsigned>(i)) || !prompt.append(",\"text\":") ||
-        !prompt.quoted(batch[i].source) ||
-        !prompt.append(batch[i].translation.empty() ? ",\"need_sentence\":true,\"words\":["
-                                                    : ",\"need_sentence\":false,\"words\":["))
+    if (!prompt.append("{\"id\":") || !prompt.integer(static_cast<unsigned>(i)) ||
+        !prompt.append(",\"text\":") || !prompt.quoted(batch[i].source) || !prompt.append("}"))
       return false;
-    for (size_t w = 0; w < batch[i].words.size(); ++w) {
-      if (w && !prompt.append(",")) return false;
-      if (!prompt.append("{\"i\":") || !prompt.integer(static_cast<unsigned>(w)) || !prompt.append(",\"text\":") ||
-          !prompt.quoted(batch[i].words[w].source) || !prompt.append("}"))
-        return false;
-    }
-    if (!prompt.append("]}")) return false;
   }
   if (!prompt.append("]}")) return false;
 
@@ -312,37 +302,18 @@ bool buildRequest(const std::vector<ai_prefetch::Sentence>& batch, bool gemini, 
   return bodyBytes > 0;
 }
 
-// A model can return only a sentence, only a subset of requested words, or
-// both. Persist every validated fragment; the cache merges it with old data.
+// Only complete, validated sentence translations are committed. Word mappings
+// are neither sent to the model nor required for the popup.
 bool saveItem(JsonVariantConst item, const ai_prefetch::Scope& scope, const std::vector<ai_prefetch::Sentence>& batch,
               bool* stored) {
   if (!item["id"].is<int>()) return false;
   const int id = item["id"].as<int>();
   if (id < 0 || id >= static_cast<int>(batch.size())) return false;
-  ai_prefetch::Sentence record = batch[id];
-  record.translation.clear();
-  record.words.clear();
   const char* translated = item["translation"].as<const char*>();
-  if (batch[id].translation.empty() && translated && *translated && strlen(translated) <= 4096)
-    record.translation = translated;
-  JsonArrayConst words = item["words"].as<JsonArrayConst>();
-  bool used[ai_prefetch::MAX_WORDS] = {};
-  if (!words.isNull()) {
-    for (JsonVariantConst word : words) {
-      if (!word["i"].is<int>()) continue;
-      const int i = word["i"].as<int>();
-      const char* value = word["translation"].as<const char*>();
-      if (i < 0 || i >= static_cast<int>(batch[id].words.size()) || used[i] || !value || !*value || strlen(value) > 256)
-        continue;
-      ai_prefetch::Word translatedWord = batch[id].words[i];
-      translatedWord.translation = value;
-      record.words.push_back(std::move(translatedWord));
-      used[i] = true;
-    }
-  }
-  if (record.translation.empty() && record.words.empty()) return false;
-  std::sort(record.words.begin(), record.words.end(),
-            [](const ai_prefetch::Word& lhs, const ai_prefetch::Word& rhs) { return lhs.offset < rhs.offset; });
+  if (!translated || !*translated || strlen(translated) > 4096) return false;
+  ai_prefetch::Sentence record = batch[id];
+  record.translation = translated;
+  record.words.clear();
   if (!ai_prefetch::save(scope, record)) return false;
   stored[id] = true;
   return true;
@@ -852,14 +823,6 @@ void AiSentencePrefetchSession::acceptToken(const Token& token) {
   if (!clippingText::append(current_.source, clean, separator, ai_prefetch::MAX_SENTENCE_BYTES,
                             token.discretionaryHyphen)) {
     droppedSentence_ = true;
-  }
-  if (current_.words.size() >= ai_prefetch::MAX_WORDS || strlen(clean) > 160) {
-    droppedSentence_ = true;
-  } else if (!droppedSentence_) {
-    ai_prefetch::Word word;
-    word.offset = token.start;
-    word.source = clean;
-    current_.words.push_back(std::move(word));
   }
   lastWordEnd_ = token.end;
   if (ai_sentence::isEnd(raw)) completeSentence();

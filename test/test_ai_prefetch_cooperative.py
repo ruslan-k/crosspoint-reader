@@ -61,7 +61,7 @@ assert "ai_prefetch::BATCH_SENTENCES" in prefetch
 assert "saveCheckpoint(job.scope, job.checkpoint)" in prefetch
 assert "ai_prefetch::pending(scope_, current_, delta)" in prefetch
 assert "if (prefetch_) prefetch_->tick();" in activity
-assert "prefetch_->cancel();" in activity
+assert "prefetch_->cancel(" in activity
 assert "Foreground translation cache save: %s" in activity
 assert "Exact translation cache hit" in activity
 assert "Prefetched translation cache hit" in activity

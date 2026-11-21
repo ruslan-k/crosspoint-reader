@@ -14,10 +14,8 @@ namespace {
 
 constexpr uint64_t FNV_OFFSET = UINT64_C(14695981039346656037);
 constexpr uint64_t FNV_PRIME = UINT64_C(1099511628211);
-constexpr uint32_t MAGIC = 0x31494143;  // "CAI1"; bump when the record changes.
-constexpr size_t MAX_WORD = 256;
+constexpr uint32_t MAGIC = 0x32494143;  // "CAI2": sentence-only keys and payloads.
 constexpr size_t MAX_SENTENCE = 2048;
-constexpr size_t MAX_WORD_RESULT = 256;
 constexpr size_t MAX_SENTENCE_RESULT = 4096;
 constexpr const char* ROOT = "/.crosspoint/ai-cache";
 
@@ -54,14 +52,14 @@ uint64_t combine(uint64_t h, std::string_view s) {
 }
 
 uint64_t scope(std::string_view book, std::string_view url, std::string_view model) {
-  uint64_t h = combine(FNV_OFFSET, "ru/v1");
+  uint64_t h = combine(FNV_OFFSET, "ru/v2");
   h = combine(h, book);
   h = combine(h, url);
   return combine(h, model);
 }
 
-uint64_t key(uint64_t scopeHash, std::string_view word, std::string_view sentence) {
-  return combine(combine(scopeHash, word), sentence);
+uint64_t key(uint64_t scopeHash, std::string_view sentence) {
+  return combine(scopeHash, sentence);
 }
 
 std::string hex(uint64_t n) {
@@ -74,8 +72,8 @@ std::string directory(uint64_t scopeHash) { return std::string(ROOT) + "/" + hex
 
 std::string path(uint64_t scopeHash, uint64_t keyHash) { return directory(scopeHash) + "/" + hex(keyHash) + ".bin"; }
 
-bool validSource(std::string_view word, std::string_view sentence) {
-  return word.size() <= MAX_WORD && !sentence.empty() && sentence.size() <= MAX_SENTENCE;
+bool validSource(std::string_view sentence) {
+  return !sentence.empty() && sentence.size() <= MAX_SENTENCE;
 }
 
 bool readMatching(HalFile& file, std::string_view expected, uint64_t& hash) {
@@ -107,47 +105,42 @@ bool writePart(HalFile& file, std::string_view bytes) {
 
 }  // namespace
 
-bool load(std::string_view book, std::string_view url, std::string_view model, std::string_view word,
-          std::string_view sentence, std::string& wordTranslation, std::string& sentenceTranslation) {
-  if (!validSource(word, sentence)) return false;
+bool load(std::string_view book, std::string_view url, std::string_view model,
+          std::string_view sentence, std::string& translation) {
+  translation.clear();
+  if (!validSource(sentence)) return false;
   const auto memory = HalMemory::getDefaultHeap();
-  // Cache lookup must never consume the reader's last contiguous block.
   if (memory.freeBytes < 16 * 1024 || memory.largestBlockBytes < 8 * 1024) return false;
   const uint64_t s = scope(book, url, model);
-  const uint64_t k = key(s, word, sentence);
+  const uint64_t k = key(s, sentence);
   const std::string filename = path(s, k);
   if (!Storage.exists(filename.c_str())) return false;
   HalFile file;
   if (!Storage.openFileForRead("AI_CACHE", filename, file)) return false;
   Header h;
-  bool ok =
-      file.read(&h, sizeof(h)) == sizeof(h) && h.magic == MAGIC && h.reserved == 0 && h.scopeHash == s &&
-      h.keyHash == k && h.wordBytes == word.size() && h.sentenceBytes == sentence.size() &&
-      h.translatedWordBytes <= MAX_WORD_RESULT && h.translatedSentenceBytes > 0 &&
-      h.translatedSentenceBytes <= MAX_SENTENCE_RESULT &&
-      file.fileSize() == sizeof(h) + h.wordBytes + h.sentenceBytes + h.translatedWordBytes + h.translatedSentenceBytes;
+  bool ok = file.read(&h, sizeof(h)) == sizeof(h) && h.magic == MAGIC && h.reserved == 0 &&
+            h.scopeHash == s && h.keyHash == k && h.wordBytes == 0 &&
+            h.translatedWordBytes == 0 && h.sentenceBytes == sentence.size() &&
+            h.translatedSentenceBytes > 0 && h.translatedSentenceBytes <= MAX_SENTENCE_RESULT &&
+            file.fileSize() == sizeof(h) + h.sentenceBytes + h.translatedSentenceBytes;
   uint64_t check = FNV_OFFSET;
-  if (ok) ok = readMatching(file, word, check) && readMatching(file, sentence, check);
-  if (ok) ok = readResult(file, h.translatedWordBytes, wordTranslation, check);
-  if (ok) ok = readResult(file, h.translatedSentenceBytes, sentenceTranslation, check);
+  if (ok) ok = readMatching(file, sentence, check);
+  if (ok) ok = readResult(file, h.translatedSentenceBytes, translation, check);
   file.close();
   if (!ok || check != h.payloadHash) {
-    wordTranslation.clear();
-    sentenceTranslation.clear();
+    translation.clear();
     return false;
   }
   return true;
 }
 
-bool save(std::string_view book, std::string_view url, std::string_view model, std::string_view word,
-          std::string_view sentence, std::string_view wordTranslation, std::string_view sentenceTranslation) {
-  if (!validSource(word, sentence) || wordTranslation.size() > MAX_WORD_RESULT || sentenceTranslation.empty() ||
-      sentenceTranslation.size() > MAX_SENTENCE_RESULT)
-    return false;
+bool save(std::string_view book, std::string_view url, std::string_view model,
+          std::string_view sentence, std::string_view translation) {
+  if (!validSource(sentence) || translation.empty() || translation.size() > MAX_SENTENCE_RESULT) return false;
   const auto memory = HalMemory::getDefaultHeap();
   if (memory.freeBytes < 12 * 1024 || memory.largestBlockBytes < 4 * 1024) return false;
   const uint64_t s = scope(book, url, model);
-  const uint64_t k = key(s, word, sentence);
+  const uint64_t k = key(s, sentence);
   const std::string folder = directory(s);
   if (!Storage.ensureDirectoryExists(ROOT) || !Storage.ensureDirectoryExists(folder.c_str())) return false;
   const std::string filename = path(s, k);
@@ -155,17 +148,14 @@ bool save(std::string_view book, std::string_view url, std::string_view model, s
   Header h;
   h.scopeHash = s;
   h.keyHash = k;
-  h.wordBytes = word.size();
   h.sentenceBytes = sentence.size();
-  h.translatedWordBytes = wordTranslation.size();
-  h.translatedSentenceBytes = sentenceTranslation.size();
-  h.payloadHash = update(update(update(update(FNV_OFFSET, word.data(), word.size()), sentence.data(), sentence.size()),
-                                wordTranslation.data(), wordTranslation.size()),
-                         sentenceTranslation.data(), sentenceTranslation.size());
+  h.translatedSentenceBytes = translation.size();
+  h.payloadHash = update(update(FNV_OFFSET, sentence.data(), sentence.size()),
+                         translation.data(), translation.size());
   HalFile file;
   if (!Storage.openFileForWrite("AI_CACHE", temp, file)) return false;
-  const bool ok = file.write(&h, sizeof(h)) == sizeof(h) && writePart(file, word) && writePart(file, sentence) &&
-                  writePart(file, wordTranslation) && writePart(file, sentenceTranslation);
+  const bool ok = file.write(&h, sizeof(h)) == sizeof(h) &&
+                  writePart(file, sentence) && writePart(file, translation);
   file.flush();
   file.close();
   if (ok && Storage.replaceFile(temp.c_str(), filename.c_str())) return true;

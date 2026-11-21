@@ -17,7 +17,7 @@ required = {
     "MAX_RESPONSE_BYTES = 48 * 1024",
     "MALLOC_CAP_SPIRAM",
     "DeserializationOption::Filter(filter)",
-    "extractTranslationText(output, wordTranslation, sentenceTranslation)",
+    "extractTranslationText(output, sentenceTranslation)",
     "ai_completion::maxOutputTokens(generationAttempt_)",
     "ai_completion::shouldRetry(finishReason, generationAttempt_)",
     "retryPending_ = true;",

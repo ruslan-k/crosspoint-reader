@@ -155,53 +155,45 @@ bool safeEndpoint(const std::string& url) {
   return url.find('/', 8) != 8 && url.find(':', 8) != 8;
 }
 
-bool extractLabeledTranslation(const std::string& output, std::string& word, std::string& sentence) {
-  // The response body is a user-configured model's output, so do not assume
-  // it obeyed the format or try to treat it as a trusted markup document.
-  const size_t w = output.find("WORD:");
-  if (w == std::string::npos) return false;
-  const size_t lineEnd = output.find('\n', w);
-  if (lineEnd == std::string::npos) return false;
-  const size_t s = output.find("SENTENCE:", lineEnd);
-  if (s == std::string::npos) return false;
-  word = trim(output.substr(w + 5, lineEnd - w - 5));
-  sentence = trim(output.substr(s + 9));
-  if (word.empty() || sentence.empty() || word.size() > 256 || sentence.size() > 4096) return false;
-  // Strip a stray closing fence, but never interpret content as HTML.
-  const size_t fence = sentence.find("\n```");
-  if (fence != std::string::npos) sentence.resize(fence);
-  return !sentence.empty();
-}
-
-// Backward-compatible response decoding for providers that return either the
-// new compact JSON payload or the old WORD:/SENTENCE: two-line form.
-bool extractTranslationText(const std::string& raw, std::string& word, std::string& sentence) {
-  const std::string output = trim(raw);
-  const size_t start = output.find('{');
-  const size_t end = output.rfind('}');
-  if (start != std::string::npos && end != std::string::npos && end >= start && end - start < 8192) {
-    JsonDocument translated;
-    if (deserializeJson(translated, output.substr(start, end - start + 1)) == DeserializationError::Ok) {
-      const char* w = translated["word_translation"].as<const char*>();
-      const char* t = translated["sentence_translation"].as<const char*>();
-      if (w && t) {
-        word = trim(w);
-        sentence = trim(t);
-        if (!word.empty() && !sentence.empty() && word.size() <= 256 && sentence.size() <= 4096) return true;
-      }
-    }
+// Sentence-only decoder: accept compact JSON, earlier two-field JSON,
+// legacy WORD:/SENTENCE: replies, or a plain-text translation.
+bool extractTranslationText(const std::string& raw, std::string& sentence) {
+  std::string output = trim(raw);
+  if (output.empty() || output.size() > 8192) return false;
+  if (output.compare(0, 3, "```") == 0) {
+    const size_t firstNewline = output.find('\n');
+    const size_t closing = output.rfind("```");
+    if (firstNewline == std::string::npos || closing <= firstNewline) return false;
+    output = trim(output.substr(firstNewline + 1, closing - firstNewline - 1));
   }
-  return extractLabeledTranslation(output, word, sentence);
+  if (output.empty()) return false;
+  if (output[0] == '{') {
+    JsonDocument json;
+    if (deserializeJson(json, output) != DeserializationError::Ok) return false;
+    const char* text = json["translation"].as<const char*>();
+    if (!text) text = json["sentence_translation"].as<const char*>();
+    if (!text) text = json["t"].as<const char*>();
+    if (!text) return false;
+    sentence = trim(text);
+  } else if (output.rfind("WORD:", 0) == 0) {
+    const size_t pos = output.find("SENTENCE:");
+    if (pos == std::string::npos) return false;
+    sentence = trim(output.substr(pos + sizeof("SENTENCE:") - 1));
+  } else if (output.rfind("SENTENCE:", 0) == 0) {
+    sentence = trim(output.substr(sizeof("SENTENCE:") - 1));
+  } else {
+    sentence = std::move(output);
+  }
+  return !sentence.empty() && sentence.size() <= 4096;
 }
 
 }  // namespace
 
 AiSentenceTranslationActivity::AiSentenceTranslationActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                                             std::string word, std::string sentence,
-                                                             std::string bookPath, AiPrefetchOrigin origin,
+                                                             std::string sentence, std::string bookPath,
+                                                             AiPrefetchOrigin origin,
                                                              std::function<void(std::unique_ptr<AiSentencePrefetchSession>, bool)> onHandoff)
     : Activity("AiSentenceTranslation", renderer, mappedInput),
-      word_(std::move(word)),
       sentence_(std::move(sentence)),
       bookPath_(std::move(bookPath)),
       origin_(origin),
@@ -261,8 +253,6 @@ void AiSentenceTranslationActivity::preparePopupLines() {
     }
   };
 
-  append(word_ + " — " + wordTranslation_, true);
-  append("", false);
   append(tr(STR_AI_ORIGINAL), true);
   append(sentence_, false);
   append("", false);
@@ -326,23 +316,21 @@ void AiSentenceTranslationActivity::fail(std::string reason) {
 void AiSentenceTranslationActivity::onEnter() {
   Activity::onEnter();
   captureUnderlyingPage();
-  if (sentence_.empty() || sentence_.size() > MAX_SENTENCE_BYTES || word_.empty()) {
+  if (sentence_.empty() || sentence_.size() > MAX_SENTENCE_BYTES) {
     fail(tr(STR_AI_BAD_RESPONSE));
     return;
   }
-  std::string cachedWord, cachedSentence;
+  std::string cachedSentence;
 #if defined(FREEINK_DEVICE_PICCO)
   // Offline package lookup before provider configuration and before Wi-Fi.
   bool complete = false;
-  const auto packageResult =
-      ai_book_cache::lookup(bookPath_, word_, sentence_, origin_.wordOccurrence,
-                            cachedWord, cachedSentence, complete);
+  const auto packageResult = ai_book_cache::lookupSentence(bookPath_, sentence_, cachedSentence, complete);
   fullBookCache_ = complete;
   if (packageResult == ai_book_cache::Result::Hit) {
     if (!complete && AI_TRANSLATION_STORE.loadFromFile())
       ai_cache_server::watch(bookPath_, AI_TRANSLATION_STORE.getCacheServerUrl());
     LOG_INF("AI_CACHE", "Book package cache hit");
-    openResult(std::move(cachedWord), std::move(cachedSentence));
+    openResult(std::move(cachedSentence));
     return;
   }
   LOG_INF("AI_CACHE", "Book package miss: %s", ai_book_cache::resultName(packageResult));
@@ -360,26 +348,26 @@ void AiSentenceTranslationActivity::onEnter() {
 
   // No radio, TLS, or renderer work for a cached exact word+sentence.
   // A book/provider/model change has a separate on-disk namespace.
-  if (ai_translation_cache::load(bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel(), word_,
-                                 sentence_, cachedWord, cachedSentence)) {
+  if (ai_translation_cache::load(bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel(),
+                                 sentence_, cachedSentence)) {
     LOG_INF("AI_CACHE", "Exact translation cache hit");
-    openResult(std::move(cachedWord), std::move(cachedSentence));
+    openResult(std::move(cachedSentence));
     return;
   }
 
-  // Picco lookahead records include a position-specific word mapping and
-  // allow an instant offline result even when the foreground exact cache misses.
+  // Picco lookahead is keyed by sentence position and content, not by which
+  // word was selected. The same translated sentence is returned for any word.
 #if defined(FREEINK_DEVICE_PICCO)
-  if (origin_.sentenceStartOffset != UINT32_MAX && origin_.selectedWordOffset != UINT32_MAX) {
+  if (origin_.sentenceStartOffset != UINT32_MAX) {
     const ai_prefetch::Scope scope{bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel()};
     ai_prefetch::Sentence needle;
     needle.spine = origin_.spine;
     needle.start = origin_.sentenceStartOffset;
     needle.end = UINT32_MAX;
     needle.source = sentence_;
-    if (ai_prefetch::lookup(scope, needle, origin_.selectedWordOffset, word_, cachedWord, cachedSentence)) {
+    if (ai_prefetch::lookupSentence(scope, needle, cachedSentence)) {
       LOG_INF("AI_CACHE", "Prefetched translation cache hit");
-      openResult(std::move(cachedWord), std::move(cachedSentence));
+      openResult(std::move(cachedSentence));
       return;
     }
   }
@@ -418,7 +406,7 @@ void AiSentenceTranslationActivity::onEnter() {
   });
 }
 
-bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std::string& sentenceTranslation) {
+bool AiSentenceTranslationActivity::translate(std::string& sentenceTranslation) {
   if (!trustedtime::trustedNow() && !trustedtime::syncNow(5000)) {
     fail(tr(STR_AI_CLOCK_ERROR));
     return false;
@@ -460,12 +448,9 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
   const char* reasoningEffort = ai_completion::reasoningEffort(config.getModel(), url, config.getReasoningEffort());
 
   const std::string prompt =
-      "Translate the selected word in context and its complete source sentence into Russian. "
-      "Output a single compact JSON object with exactly two string keys: "
-      "word_translation and sentence_translation. No reasoning, examples, alternatives, markdown, or explanations. "
-      "The sentence_translation must cover the whole source sentence.\n\n"
-      "Selected word: " +
-      word_ + "\nSource sentence: " + sentence_;
+      "Translate this complete sentence into natural, faithful Russian. "
+      "Preserve its meaning, tone and punctuation. Reply with only the translation, "
+      "without explanations, JSON, labels or markdown.\n\n" + sentence_;
 
   JsonDocument req;
   if (gemini) {
@@ -640,7 +625,7 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
       if (const char* text = answer["output_text"].as<const char*>()) output = text;
     }
   }
-  if (!extractTranslationText(output, wordTranslation, sentenceTranslation)) {
+  if (!extractTranslationText(output, sentenceTranslation)) {
     const char* finish = gemini ? answer["candidates"][0]["finishReason"].as<const char*>()
                                 : answer["choices"][0]["finish_reason"].as<const char*>();
     const std::string_view finishReason = finish ? std::string_view(finish) : std::string_view();
@@ -672,10 +657,9 @@ bool AiSentenceTranslationActivity::translate(std::string& wordTranslation, std:
   return true;
 }
 
-void AiSentenceTranslationActivity::openResult(std::string wordTranslation, std::string sentenceTranslation) {
+void AiSentenceTranslationActivity::openResult(std::string sentenceTranslation) {
   {
     RenderLock lock;
-    wordTranslation_ = std::move(wordTranslation);
     sentenceTranslation_ = std::move(sentenceTranslation);
     preparePopupLines();
     state_ = State::Showing;
@@ -704,16 +688,16 @@ void AiSentenceTranslationActivity::loop() {
     ai_cache_server::tick(prefetch_ != nullptr);
     if (ai_cache_server::takeUpdated(bookPath_)) {
       bool complete = false;
-      std::string freshWord, freshSentence;
-      if (ai_book_cache::lookup(bookPath_, word_, sentence_, origin_.wordOccurrence,
-                                freshWord, freshSentence, complete) == ai_book_cache::Result::Hit) {
+      std::string freshSentence;
+      if (ai_book_cache::lookupSentence(bookPath_, sentence_, freshSentence, complete) ==
+          ai_book_cache::Result::Hit) {
         fullBookCache_ = complete;
         if (complete && prefetch_) {
           prefetch_->cancel(false);
           prefetch_.reset();
         }
         LOG_INF("AI_CACHE", "Book package cache hit");
-        openResult(std::move(freshWord), std::move(freshSentence));
+        openResult(std::move(freshSentence));
       }
     }
   }
@@ -779,34 +763,26 @@ void AiSentenceTranslationActivity::loop() {
   requestPending_ = false;
   state_ = State::Translating;
   requestUpdateAndWait();
-  std::string wordTranslation;
   std::string sentenceTranslation;
-  if (translate(wordTranslation, sentenceTranslation)) {
-    openResult(std::move(wordTranslation), std::move(sentenceTranslation));
+  if (translate(sentenceTranslation)) {
+    openResult(std::move(sentenceTranslation));
     // Save only validated provider output; failed/partial results never enter the cache.
     // This happens after queuing the popup render, so the first result is not
     // delayed by filesystem housekeeping.
     const bool cached =
-        ai_translation_cache::save(bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel(), word_,
-                                   sentence_, wordTranslation_, sentenceTranslation_);
+        ai_translation_cache::save(bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel(),
+                                   sentence_, sentenceTranslation_);
     LOG_INF("AI_CACHE", "Foreground translation cache save: %s", cached ? "ok" : "skipped");
 #if defined(FREEINK_DEVICE_PICCO)
-    // Seed the same position-addressed cache used by streaming prefetch.
-    // Even if Translate closes before the next packet finishes, the already
-    // translated sentence and selected word remain durable and are excluded
-    // from future AI batch payloads.
-    if (origin_.sentenceStartOffset != UINT32_MAX && origin_.selectedWordOffset != UINT32_MAX &&
-        origin_.selectedWordOffset >= origin_.sentenceStartOffset) {
+    // A foreground hit is reusable for every selected word in this sentence.
+    // Do not create any separate word translation or word-specific cache key.
+    if (origin_.sentenceStartOffset != UINT32_MAX) {
       ai_prefetch::Sentence known;
       known.spine = origin_.spine;
       known.start = origin_.sentenceStartOffset;
-      known.end = UINT32_MAX;  // Selection does not carry the sentence's end offset.
+      known.end = UINT32_MAX;
       known.source = sentence_;
       known.translation = sentenceTranslation_;
-      if (!word_.empty() && word_.size() <= 160 && word_.find_first_of(" \n\t\r") == std::string::npos &&
-          !wordTranslation_.empty() && wordTranslation_.size() <= 256) {
-        known.words.push_back({origin_.selectedWordOffset, word_, wordTranslation_});
-      }
       const ai_prefetch::Scope scope{bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel()};
       LOG_INF("AI_CACHE", "Foreground seeded lookahead cache: %s", ai_prefetch::save(scope, known) ? "ok" : "skipped");
     }

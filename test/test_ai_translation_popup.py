@@ -35,4 +35,8 @@ assert "AI_POPUP_FOOTER_HEIGHT = 0" in src
 assert "UI_10_FONT_ID" in src
 assert "ai_translation_cache::load(" in src
 assert "ai_translation_cache::save(" in src
+assert 'append(word_ + " — "' not in src
+assert "ai_book_cache::lookupSentence(" in src
+assert "ai_prefetch::lookupSentence(" in src
+assert "Translate this complete sentence" in src
 print("AI translation popup, scrolling, and selection guards passed")
