@@ -281,7 +281,6 @@ class EpubReaderActivity final : public ReaderActivity {
   void onExit() override;
   void prepareForSleep() override;
   void loop() override;
-  void prepareForSleep() override;
   void render(RenderLock&& lock) override;
 
   bool pageTurn(bool isForward) override;

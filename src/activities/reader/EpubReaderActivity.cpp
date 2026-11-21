@@ -281,6 +281,17 @@ void EpubReaderActivity::prepareForSleep() {
   stopBackgroundPrefetch("sleep");
 #endif
   ReaderActivity::prepareForSleep();
+  if (!epub || !KOREADER_STORE.getSyncOnSleep() || !KOREADER_STORE.hasCredentials()) return;
+  // Sync On Sleep runs after this activity is gone, so hand over the position now.
+  // ActivityManager already holds the render lock here; taking it again would deadlock.
+  CrossPointPosition position = getCurrentPosition();
+  if (isAtEndOfBook() && epub->getSpineItemsCount() > 0) {
+    // The finished screen sits one past the last chapter, which has no size or XPath.
+    // Hand over the end of the last chapter instead.
+    position = {epub->getSpineItemsCount() - 1, 1, 2};
+    position.hasResolvedSpineIndex = true;
+  }
+  syncEngine::noteSleepBook(epub->getPath(), position);
 }
 
 #if defined(FREEINK_DEVICE_PICCO)
@@ -3598,20 +3609,6 @@ void EpubReaderActivity::restoreSavedPosition() {
   requestUpdate();
 }
 
-void EpubReaderActivity::prepareForSleep() {
-  ReaderActivity::prepareForSleep();
-  if (!epub || !KOREADER_STORE.getSyncOnSleep() || !KOREADER_STORE.hasCredentials()) return;
-  // Sync On Sleep runs after this activity is gone, so hand over the position now.
-  // ActivityManager already holds the render lock here; taking it again would deadlock.
-  CrossPointPosition position = getCurrentPosition();
-  if (isAtEndOfBook() && epub->getSpineItemsCount() > 0) {
-    // The finished screen sits one past the last chapter, which has no size or XPath.
-    // Hand over the end of the last chapter instead.
-    position = {epub->getSpineItemsCount() - 1, 1, 2};
-    position.hasResolvedSpineIndex = true;
-  }
-  syncEngine::noteSleepBook(epub->getPath(), position);
-}
 
 void EpubReaderActivity::loadCachedBookmarks() {
   cachedBookmarks.clear();
