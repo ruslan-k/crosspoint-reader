@@ -156,12 +156,18 @@ void updateReadTimeout(Response& response, esp_http_client_handle_t client, bool
 
 const char* httpResultName(esp_err_t result) {
   switch (result) {
-    case ESP_OK: return "ESP_OK";
-    case ESP_ERR_HTTP_EAGAIN: return "ESP_ERR_HTTP_EAGAIN";
-    case ESP_ERR_HTTP_FETCH_HEADER: return "ESP_ERR_HTTP_FETCH_HEADER";
-    case ESP_ERR_HTTP_CONNECT: return "ESP_ERR_HTTP_CONNECT";
-    case ESP_ERR_HTTP_WRITE_DATA: return "ESP_ERR_HTTP_WRITE_DATA";
-    default: return esp_err_to_name(result);
+    case ESP_OK:
+      return "ESP_OK";
+    case ESP_ERR_HTTP_EAGAIN:
+      return "ESP_ERR_HTTP_EAGAIN";
+    case ESP_ERR_HTTP_FETCH_HEADER:
+      return "ESP_ERR_HTTP_FETCH_HEADER";
+    case ESP_ERR_HTTP_CONNECT:
+      return "ESP_ERR_HTTP_CONNECT";
+    case ESP_ERR_HTTP_WRITE_DATA:
+      return "ESP_ERR_HTTP_WRITE_DATA";
+    default:
+      return esp_err_to_name(result);
   }
 }
 
@@ -189,7 +195,8 @@ esp_err_t onHttpEvent(esp_http_client_event_t* event) {
       if (!result->headersReceived) {
         result->headersReceived = true;
         result->phase = "first_byte";
-        LOG_INF("AI_PRE", "Phase: response_headers elapsed_ms=%u", static_cast<unsigned>(millis() - result->startedAt));
+        LOG_INF("AI_PRE", "Phase: response_headers elapsed_ms=%u",
+                static_cast<unsigned>(millis() - result->startedAt));
       }
       break;
     case HTTP_EVENT_ON_DATA:
@@ -514,6 +521,7 @@ void AiSentencePrefetchSession::runBatch(void* data) {
   Job& job = *holder;
 
   esp_err_t result = ESP_FAIL;
+  bool performed = false;
   int status = -1;
   int tlsError = 0;
   int tlsFlags = 0;
@@ -528,7 +536,7 @@ void AiSentencePrefetchSession::runBatch(void* data) {
   } else if (job.client) {
     // This is blocking ONLY in the dedicated worker, never on the UI task.
     // Exactly one perform call: no repeated, potentially billable POST.
-    stopReason = "http_error";
+    performed = true;
     result = esp_http_client_perform(job.client);
     status = esp_http_client_get_status_code(job.client);
     if (status == 200) consumeStream(job);
@@ -558,12 +566,16 @@ void AiSentencePrefetchSession::runBatch(void* data) {
   }
   if (job.cancel.load(std::memory_order_acquire)) {
     stopReason = "cancelled";
-  } else if (result == ESP_OK && status == 200) {
-    stopReason = job.parseError ? "parser_error" : job.savedCount ? "completed" : "no_usable_items";
-  } else if (result == ESP_OK && status != 200) {
-    stopReason = "http_status";
-  } else if (result != ESP_FAIL || stopReason[0] == 'h') {
-    stopReason = "transport_error";
+  } else if (performed) {
+    if (result != ESP_OK) {
+      stopReason = "transport_error";
+    } else if (status != 200) {
+      stopReason = "http_status";
+    } else if (job.parseError) {
+      stopReason = "parser_error";
+    } else {
+      stopReason = job.savedCount ? "completed" : "no_usable_items";
+    }
   }
   LOG_INF("AI_PRE",
           "Worker stored %u/%u HTTP=%d err=%d err_name=%s tls=%d tls_flags=%d socket_errno=%d "
