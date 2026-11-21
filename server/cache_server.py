@@ -63,6 +63,35 @@ def snapshot(sha, records, results, complete):
     return info["records"], info["bytes"], digest
 
 
+def quality_repair(sha, records, results, ctx):
+    """Re-translate flagged sentences and update results in place."""
+    bad = [(i, r) for i, r in enumerate(records)
+           if gen.quality_issues(r["sentence"],
+                                 results.get(str(gen.fnv1a(r["sentence"])), {}).get("translation", ""))]
+    if not bad:
+        return 0, 0
+    fixed = 0
+    for start in range(0, len(bad), BATCH):
+        chunk = bad[start:start + BATCH]
+        resp = {}
+        for attempt in range(3):
+            try:
+                resp = gen.translate_batch([r for _, r in chunk], ctx, records, chunk[0][0])
+                break
+            except Exception as exc:
+                print(f"[{sha[:8]}] repair batch {start} attempt {attempt}: {exc}", flush=True)
+                time.sleep(3)
+        for local, (idx, rec) in enumerate(chunk):
+            obj = resp.get(local)
+            if not obj or gen.quality_issues(rec["sentence"], obj.get("translation", "")):
+                continue
+            key = gen.fnv1a(rec["sentence"])
+            obj["key"] = f"{idx % BATCH:02d}-{key & 0xffff:04x}"
+            results[str(key)] = obj
+            fixed += 1
+    return len(bad), fixed
+
+
 def worker(sha):
     d, epub, results_file, aic, _ = job_paths(sha)
     try:
@@ -94,6 +123,11 @@ def worker(sha):
             save_state(sha, {"state": "translating", "done": done, "total": len(records),
                              "bytes": size, "aic_sha256": digest})
             print(f"[{sha[:8]}] {done}/{len(records)}", flush=True)
+        bad, fixed = quality_repair(sha, records, results, ctx)
+        if bad:
+            with open(results_file, "w") as f:
+                json.dump(results, f, ensure_ascii=False)
+            print(f"[{sha[:8]}] quality check: {bad} flagged, {fixed} fixed", flush=True)
         fully_translated = len(results) >= len(records)
         done, size, digest = snapshot(sha, records, results, fully_translated)
         save_state(sha, {"state": "ready" if fully_translated else "translating", "done": done, "total": len(records),

@@ -43,6 +43,6 @@ else:
 # A line from outside the batch must be ignored, not assigned to a sentence.
 extra = good + "\n" + json.dumps({"id": 9, "key": "09-dead", "translation": "T9"})
 assert set(gen.parse_ndjson(extra, KEYS)) == set(KEYS)
-assert gen.has_untranslated("to be burdened with such a family", "и вдругsuch обзавестись")
-assert not gen.has_untranslated("The cop watched", "Коп наблюдал")
+assert "latin_leftover" in gen.quality_issues("to be burdened with such a family", "и вдругsuch обзавестись")
+assert gen.quality_issues("The cop watched", "Коп наблюдал") == []
 print("alignment self-check OK")

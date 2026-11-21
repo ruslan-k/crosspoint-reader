@@ -212,10 +212,21 @@ def parse_ndjson(raw, keys):
     return out
 
 
-def has_untranslated(source, translation):
-    """Catch a lowercase English word copied verbatim into Russian output."""
-    leftovers = {w.lower() for w in re.findall(r"\b[a-z]{3,}\b", source)}
-    return bool(leftovers & {w.lower() for w in re.findall(r"[A-Za-z]{3,}", translation)})
+def latin_leftover(translation):
+    """Flag any Latin-script word in Russian output, copied or hallucinated."""
+    return bool(re.findall(r"[A-Za-z]{3,}", translation))
+
+
+def quality_issues(source, translation):
+    """Reject empty, copied or English-leaking translations."""
+    issues = []
+    if not translation or not translation.strip():
+        issues.append("empty")
+    if latin_leftover(translation):
+        issues.append("latin_leftover")
+    if translation and translation.strip() == source.strip():
+        issues.append("untranslated_copy")
+    return issues
 
 
 def translate_batch(batch, ctx, all_records, offset):
@@ -245,8 +256,9 @@ def translate_batch(batch, ctx, all_records, offset):
         os.unlink(pf)
     out = parse_ndjson(raw, keys)
     for i, obj in out.items():
-        if has_untranslated(batch[i]["sentence"], obj["translation"]):
-            raise ValueError(f"untranslated source word in sentence {i}")
+        issues = quality_issues(batch[i]["sentence"], obj["translation"])
+        if issues:
+            raise ValueError(f"translation quality in sentence {i}: {','.join(issues)}")
     return out
 
 

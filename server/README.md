@@ -87,10 +87,16 @@ sentence. Increasing reasoning effort does not prevent this class of error.
 Each batch writes its prompt to a separate temporary file, so concurrent book
 jobs cannot overwrite each other's prompts.
 
-A batch is also rejected when a lowercase English word from the source appears
-verbatim in the Russian translation. During the four-story test this caught
-`such` and `cop` in two sentences; both were retranslated and the packages
-repacked. Capitalized source words (names) are not affected.
+A batch is also rejected when the Russian output contains a Latin-script word
+(three letters or more), whether copied from the source or hallucinated. During
+the four-story test this caught a leaked `such` and `copa` in two sentences;
+both were retranslated and the packages repacked.
+
+At the end of each job the server applies the same check to every stored
+translation and re-translates flagged sentences (up to three attempts, a batch
+at a time). Results that still fail are left unchanged and reported in the log
+as `quality check: N flagged, M fixed`; the final snapshot includes whatever was
+fixed.
 
 ## Verification
 
