@@ -46,6 +46,7 @@ struct ClippingResult {
   std::string text;
   std::string sentence;                       // Only filled by Translate, never persisted as a clipping.
   uint32_t sentenceStartOffset = UINT32_MAX;  // Absolute source offset; needed to disambiguate repeat sentences.
+  uint16_t wordOccurrence = UINT16_MAX;       // 0-based among identical visible words in the sentence.
   uint16_t startPageOffset = 0;
   uint16_t endPageOffset = 0;
   uint16_t startWordIndex = 0;

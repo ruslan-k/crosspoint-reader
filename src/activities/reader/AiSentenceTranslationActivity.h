@@ -18,6 +18,7 @@ struct AiPrefetchOrigin {
   int firstPage = 0;
   uint32_t sentenceStartOffset = UINT32_MAX;
   uint32_t selectedWordOffset = UINT32_MAX;
+  uint16_t wordOccurrence = UINT16_MAX;
 };
 
 // One foreground BYOK request, followed by a scrollable dictionary-style
@@ -58,6 +59,7 @@ class AiSentenceTranslationActivity final : public Activity {
   std::unique_ptr<AiSentencePrefetchSession> prefetch_;
   std::function<void(std::unique_ptr<AiSentencePrefetchSession>, bool)> onHandoff_;
   bool waitingForBackground_ = false;
+  bool fullBookCache_ = false;
   std::string error_;
   bool requestPending_ = false;
   bool retryPending_ = false;

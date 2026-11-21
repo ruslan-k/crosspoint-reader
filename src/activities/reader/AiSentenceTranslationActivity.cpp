@@ -29,6 +29,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/AiApiEndpoint.h"
+#include "util/AiBookCache.h"
 #include "util/AiCompletionPolicy.h"
 #include "util/AiTranslationCache.h"
 #include "util/AiTranslationRoots.h"
@@ -324,18 +325,32 @@ void AiSentenceTranslationActivity::fail(std::string reason) {
 void AiSentenceTranslationActivity::onEnter() {
   Activity::onEnter();
   captureUnderlyingPage();
-  if (!AI_TRANSLATION_STORE.loadFromFile() || !AI_TRANSLATION_STORE.configured()) {
-    fail(tr(STR_AI_NOT_CONFIGURED));
-    return;
-  }
   if (sentence_.empty() || sentence_.size() > MAX_SENTENCE_BYTES || word_.empty()) {
     fail(tr(STR_AI_BAD_RESPONSE));
+    return;
+  }
+  std::string cachedWord, cachedSentence;
+#if defined(FREEINK_DEVICE_PICCO)
+  // Offline package lookup before provider configuration and before Wi-Fi.
+  bool complete = false;
+  const auto packageResult =
+      ai_book_cache::lookup(bookPath_, word_, sentence_, origin_.wordOccurrence,
+                            cachedWord, cachedSentence, complete);
+  fullBookCache_ = complete;
+  if (packageResult == ai_book_cache::Result::Hit) {
+    LOG_INF("AI_CACHE", "Book package cache hit");
+    openResult(std::move(cachedWord), std::move(cachedSentence));
+    return;
+  }
+  LOG_INF("AI_CACHE", "Book package miss: %s", ai_book_cache::resultName(packageResult));
+#endif
+  if (!AI_TRANSLATION_STORE.loadFromFile() || !AI_TRANSLATION_STORE.configured()) {
+    fail(tr(STR_AI_NOT_CONFIGURED));
     return;
   }
 
   // No radio, TLS, or renderer work for a cached exact word+sentence.
   // A book/provider/model change has a separate on-disk namespace.
-  std::string cachedWord, cachedSentence;
   if (ai_translation_cache::load(bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel(), word_,
                                  sentence_, cachedWord, cachedSentence)) {
     LOG_INF("AI_CACHE", "Exact translation cache hit");
@@ -361,6 +376,9 @@ void AiSentenceTranslationActivity::onEnter() {
   }
 #endif
 
+#if defined(FREEINK_DEVICE_PICCO)
+  LOG_INF("AI_CACHE", "Online fallback: %s", ai_book_cache::resultName(packageResult));
+#endif
   if (auto* fontCache = renderer.getFontCacheManager()) fontCache->releaseSdFontCaches();
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -657,7 +675,9 @@ void AiSentenceTranslationActivity::openResult(std::string wordTranslation, std:
 #if defined(FREEINK_DEVICE_PICCO)
   // Do not scan or do TLS here: one small page/word scan is scheduled per
   // later UI loop tick. The EPUB reader adopts the session on popup exit.
-  if (!prefetch_ && origin_.section && origin_.selectedWordOffset != UINT32_MAX) {
+  if (fullBookCache_) {
+    LOG_INF("AI_PRE", "Disabled: complete book package");
+  } else if (!prefetch_ && origin_.section && origin_.selectedWordOffset != UINT32_MAX) {
     ai_prefetch::Scope scope{bookPath_, AI_TRANSLATION_STORE.getUrl(), AI_TRANSLATION_STORE.getModel()};
     prefetch_ = makeUniqueNoThrow<AiSentencePrefetchSession>(std::move(scope), origin_.section, origin_.spine,
                                                              origin_.firstPage, origin_.selectedWordOffset);

@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <climits>
 #include <cstdlib>
+#include <cstring>
 
 #include "ClippingStore.h"
 #include "CrossPointSettings.h"
@@ -411,7 +412,8 @@ bool ClipSelectionActivity::buildSelectedText(const int first, const int last, s
 }
 
 bool ClipSelectionActivity::buildSentenceText(const int anchor, std::string& text,
-                                              uint32_t* sentenceStartOffset) const {
+                                              uint32_t* sentenceStartOffset,
+                                               uint16_t* wordOccurrence) const {
   if (anchor < 0 || anchor >= static_cast<int>(wordCount)) return false;
   // Expand around the selected word, not the full highlighted range. The
   // selection already owns this and following pages, so boundaries can cross
@@ -423,6 +425,22 @@ bool ClipSelectionActivity::buildSentenceText(const int anchor, std::string& tex
   while (last + 1 < static_cast<int>(wordCount) && !ai_sentence::isEnd(words[last].text) &&
          !words[last + 1].paragraphStart)
     ++last;
+  if (wordOccurrence) {
+    // Count identical visible words in logical source order, not screen order.
+    uint16_t occurrence = 0;
+    if (words[anchor].startOffset == UINT32_MAX) {
+      occurrence = UINT16_MAX;
+    } else {
+      const char* selectedText = cleanWordStart(words[anchor].text);
+      for (int i = first; i <= last; ++i) {
+        if (i != anchor && words[i].startOffset != UINT32_MAX &&
+            words[i].startOffset < words[anchor].startOffset &&
+            strcmp(cleanWordStart(words[i].text), selectedText) == 0)
+          ++occurrence;
+      }
+    }
+    *wordOccurrence = occurrence;
+  }
   return buildSelectedText(first, last, text);
 }
 
@@ -443,7 +461,7 @@ void ClipSelectionActivity::confirmSelection(const ClippingResult::Action action
   const bool lowMemory = heap.largestBlockBytes < CLIPPING_TEXT_MAX + 1 || heap.freeBytes < requiredHeap;
   if (lowMemory || !buildSelectedText(first, last, result.text) ||
       (action == ClippingResult::Action::Translate &&
-       !buildSentenceText(first, result.sentence, &result.sentenceStartOffset))) {
+       !buildSentenceText(first, result.sentence, &result.sentenceStartOffset, &result.wordOccurrence))) {
     static constexpr StrId OPTIONS[] = {StrId::STR_BACK};
     actionPopup.show(lowMemory ? StrId::STR_MEMORY_ERROR : StrId::STR_CLIPPING_TOO_LONG, OPTIONS, 1, 0, [](int) {});
     requestUpdate();

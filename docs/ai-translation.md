@@ -1,5 +1,19 @@
 # AI sentence translation (BYOK)
 
+## Indexed offline whole-book packages (Picco)
+
+An external host can generate one indexed `.aic` package alongside each EPUB.
+Translate checks this package by normalized source sentence and selected-word
+occurrence **before** API configuration, existing caches, or any Wi-Fi request.
+Each package is validated against the actual raw EPUB SHA-256, its sorted
+fixed-width index CRC, and record CRCs. A valid COMPLETE package prevents
+new on-device lookahead jobs. A missing entry falls back to the existing
+on-device caches and online foreground translation.
+
+See [the versioned on-disk format](ai-cache-format.md) for byte-level details,
+path conventions, normalization, limits and host generator requirements.
+
+
 This downstream CrossPoint build adds **Translate** to EPUB text selection.
 The existing Lookup, Clip and Bookmark actions are unchanged. When no offline
 dictionary is configured, the touch action bar shows **Clip / Bookmark /

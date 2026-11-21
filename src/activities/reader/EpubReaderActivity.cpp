@@ -29,6 +29,7 @@
 #include "AiSentenceTranslationActivity.h"
 #if defined(FREEINK_DEVICE_PICCO)
 #include "AiSentencePrefetchSession.h"
+#include "util/AiBookCache.h"
 #endif
 #include "BookmarkEntry.h"
 #include "ChapterBuildGate.h"
@@ -334,6 +335,10 @@ void EpubReaderActivity::adoptBackgroundPrefetch(std::unique_ptr<AiSentencePrefe
 
 void EpubReaderActivity::backgroundPrefetchTick() {
   if (!backgroundPrefetch_) return;
+  if (ai_book_cache::knownComplete(bookPath)) {
+    stopBackgroundPrefetch("full_book_package");
+    return;
+  }
   if (!section || section.get() != backgroundPrefetchSection_ ||
       currentSpineIndex != static_cast<int>(backgroundPrefetchSpine_)) {
     stopBackgroundPrefetch("section_changed");
@@ -753,7 +758,8 @@ void EpubReaderActivity::startClipSelection(const int initialX, const int initia
 #endif
       auto translation = makeUniqueNoThrow<AiSentenceTranslationActivity>(
           renderer, mappedInput, clipping.text, clipping.sentence, bookPath,
-          AiPrefetchOrigin{section.get(), spineIndex, startPage, clipping.sentenceStartOffset, clipping.startOffset},
+          AiPrefetchOrigin{section.get(), spineIndex, startPage, clipping.sentenceStartOffset,
+                            clipping.startOffset, clipping.wordOccurrence},
           std::move(onHandoff));
       if (!translation) {
         LOG_ERR("AI", "Insufficient memory for translation screen");
