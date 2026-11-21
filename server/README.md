@@ -87,6 +87,11 @@ sentence. Increasing reasoning effort does not prevent this class of error.
 Each batch writes its prompt to a separate temporary file, so concurrent book
 jobs cannot overwrite each other's prompts.
 
+A batch is also rejected when a lowercase English word from the source appears
+verbatim in the Russian translation. During the four-story test this caught
+`such` and `cop` in two sentences; both were retranslated and the packages
+repacked. Capitalized source words (names) are not affected.
+
 ## Verification
 
 ```bash

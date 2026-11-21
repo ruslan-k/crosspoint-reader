@@ -212,6 +212,12 @@ def parse_ndjson(raw, keys):
     return out
 
 
+def has_untranslated(source, translation):
+    """Catch a lowercase English word copied verbatim into Russian output."""
+    leftovers = {w.lower() for w in re.findall(r"\b[a-z]{3,}\b", source)}
+    return bool(leftovers & {w.lower() for w in re.findall(r"[A-Za-z]{3,}", translation)})
+
+
 def translate_batch(batch, ctx, all_records, offset):
     payload = {"book": ctx, "sentences": []}
     keys = {}
@@ -237,7 +243,11 @@ def translate_batch(batch, ctx, all_records, offset):
         raw = subprocess.run(cmd, capture_output=True, text=True, timeout=240).stdout
     finally:
         os.unlink(pf)
-    return parse_ndjson(raw, keys)
+    out = parse_ndjson(raw, keys)
+    for i, obj in out.items():
+        if has_untranslated(batch[i]["sentence"], obj["translation"]):
+            raise ValueError(f"untranslated source word in sentence {i}")
+    return out
 
 
 def pack(epub, records, translations, out_path, complete=True):
