@@ -171,6 +171,9 @@ esp_err_t onHttpEvent(esp_http_client_event_t* event) {
   if (!result) return ESP_FAIL;
   // Only the worker owns the handle. Never close or mutate it in a callback.
   if (result->cancel->load(std::memory_order_acquire)) return ESP_FAIL;
+  // Bound a stream whose provider keeps sending bytes indefinitely. Socket
+  // timeout handles a stalled read; no reentrant timeout setter is needed.
+  if (result->startedAt && millis() - result->startedAt >= HTTP_TIMEOUT_MS) return ESP_FAIL;
   switch (event->event_id) {
     case HTTP_EVENT_ON_CONNECTED:
       result->phase = "fetch_headers";
@@ -647,21 +650,27 @@ void AiSentencePrefetchSession::runBatch(void* data) {
       stopReason = job.savedCount ? "completed" : "no_usable_items";
     }
   }
+  // logPrintf has a 256-byte cap, so keep every diagnostic line short.
+  // In particular, reason=cancelled must never be truncated away.
   LOG_INF("AI_PRE",
-          "Worker stored %u/%u HTTP=%d err=%d err_name=%s tls=%d tls_flags=%d socket_errno=%d "
-          "bytes=%u frames=%u frames_parse_fail=%u frames_with_text=%u textParts=%u model_chars=%u "
-          "objects=%u objects_parse_fail=%u objects_bad_id=%u recognized=%u rejected=%u "
-          "reasoning_frames=%u finish_length=%u reason=%s phase=%s elapsed_ms=%u",
+          "Worker stored %u/%u HTTP=%d err=%d err_name=%s bytes=%u frames=%u objects=%u "
+          "recognized=%u reason=%s phase=%s elapsed_ms=%u",
           static_cast<unsigned>(job.savedCount), static_cast<unsigned>(job.batch.size()), status,
-          static_cast<int>(result), httpResultName(result), tlsError, tlsFlags, socketError,
+          static_cast<int>(result), httpResultName(result),
           static_cast<unsigned>(job.response.totalBytes), static_cast<unsigned>(job.sseFrames),
+          static_cast<unsigned>(job.completedObjects), static_cast<unsigned>(job.recognizedItems),
+          stopReason, job.response.phase, static_cast<unsigned>(millis() - job.startedAt));
+  LOG_INF("AI_PRE",
+          "Stream diagnostics: frames_parse_fail=%u frames_with_text=%u textParts=%u model_chars=%u "
+          "objects_parse_fail=%u objects_bad_id=%u rejected=%u",
           static_cast<unsigned>(job.framesParseFail), static_cast<unsigned>(job.framesWithText),
           static_cast<unsigned>(job.textParts), static_cast<unsigned>(job.modelChars),
-          static_cast<unsigned>(job.completedObjects), static_cast<unsigned>(job.objectsParseFail),
-          static_cast<unsigned>(job.objectsBadId), static_cast<unsigned>(job.recognizedItems),
-          static_cast<unsigned>(job.discardedObjects), static_cast<unsigned>(job.reasoningFrames),
-          static_cast<unsigned>(job.finishLength), stopReason, job.response.phase,
-          static_cast<unsigned>(millis() - job.startedAt));
+          static_cast<unsigned>(job.objectsParseFail), static_cast<unsigned>(job.objectsBadId),
+          static_cast<unsigned>(job.discardedObjects));
+  LOG_INF("AI_PRE",
+          "Transport diagnostics: tls=%d tls_flags=%d socket_errno=%d reasoning_frames=%u finish_length=%u",
+          tlsError, tlsFlags, socketError,
+          static_cast<unsigned>(job.reasoningFrames), static_cast<unsigned>(job.finishLength));
   // The handle and deferred writes are already gone. Publish completion, then
   // exchange the WiFi handoff bit to handle a concurrent UI exit exactly once.
   job.done.store(true, std::memory_order_release);
