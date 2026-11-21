@@ -407,6 +407,8 @@ Result lookupSentence(const std::string& bookPath, std::string_view sentence,
     if (status == ReadStatus::Hit) return Result::Hit;
     if (status == ReadStatus::Corrupt) return Result::CorruptRecord;
   }
+  LOG_INF("AI_CACHE", "miss hash=%016llx len=%u", static_cast<unsigned long long>(hash),
+          static_cast<unsigned>(normalized.size()));
   return Result::SentenceMissing;
 }
 }  // namespace ai_book_cache
